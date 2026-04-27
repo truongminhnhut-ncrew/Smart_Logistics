@@ -41,14 +41,14 @@ class TrackingEventRepository(BaseRepository):
     async def find_by_shipper(self, shipper_id: str, limit: int = 100) -> List[dict]:
         """Get last N events for shipper (ordered by timestamp DESC)."""
         cursor = self.collection.find(
-            {"shipper_id": shipper_id}
+            {"shipper_id": shipper_id}, projection={"_id": 0}
         ).sort("timestamp", -1).limit(limit)
         return await cursor.to_list(length=limit)
 
     async def find_by_order(self, order_id: str, limit: int = 50) -> List[dict]:
         """Get events for specific order."""
         cursor = self.collection.find(
-            {"order_id": order_id}
+            {"order_id": order_id}, projection={"_id": 0}
         ).sort("timestamp", -1).limit(limit)
         return await cursor.to_list(length=limit)
 
@@ -57,13 +57,15 @@ class TrackingEventRepository(BaseRepository):
         Get the MOST RECENT location event for shipper.
         Used in stream processor to compute speed/heading.
         """
-        return await self.find_one(
+        cursor = self.collection.find(
             {
                 "shipper_id": shipper_id,
                 "event_type": "LOCATION_UPDATE",
             },
-            sort=[("timestamp", -1)],
-        )
+            projection={"_id": 0},
+        ).sort("timestamp", -1).limit(1)
+        results = await cursor.to_list(length=1)
+        return results[0] if results else None
 
     async def find_in_time_range(
         self,
@@ -89,7 +91,7 @@ class TrackingEventRepository(BaseRepository):
 
         cursor = self.collection.find({
             "timestamp": {"$gte": cutoff}
-        }).sort("timestamp", -1).limit(limit)
+        }, projection={"_id": 0}).sort("timestamp", -1).limit(limit)
         return await cursor.to_list(length=limit)
 
     async def count_by_shipper(self, shipper_id: str) -> int:
@@ -119,7 +121,7 @@ class TrackingEventRepository(BaseRepository):
         Returns events ordered by timestamp ASC (oldest first).
         """
         cursor = self.collection.find(
-            {"shipper_id": shipper_id}
+            {"shipper_id": shipper_id}, projection={"_id": 0}
         ).sort("timestamp", 1).limit(limit)
         return await cursor.to_list(length=limit)
 

@@ -20,7 +20,7 @@ async def connect_to_mongo() -> None:
 async def close_mongo_connection() -> None:
     """Close MongoDB connection on app shutdown."""
     global _db
-    if _db:
+    if _db is not None:
         _db.client.close()
         print("❌ Closed MongoDB connection")
 

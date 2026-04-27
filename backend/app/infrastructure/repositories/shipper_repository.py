@@ -7,6 +7,7 @@ from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.domain import Shipper
+from app.config import settings
 from .base_repository import BaseRepository
 
 
@@ -16,29 +17,47 @@ class ShipperRepository(BaseRepository):
     def __init__(self, db: AsyncIOMotorDatabase):
         super().__init__(db.shippers, Shipper)
 
+    def _active_shipper_filter(self) -> dict:
+        count = max(1, settings.simulator_shipper_count)
+        shipper_ids = [f"SHP-{i:03d}" for i in range(1, count + 1)]
+        return {"shipper_id": {"$in": shipper_ids}}
+
     async def find_by_id(self, shipper_id: str) -> Optional[dict]:
         """Find shipper by shipper_id (PK)."""
         return await self.find_one({"shipper_id": shipper_id})
 
     async def find_all_shippers(self) -> List[dict]:
         """Get all shippers with current GPS state."""
-        return await self.find_all()
+        cursor = self.collection.find(self._active_shipper_filter(), projection={"_id": 0}).sort("shipper_id", 1)
+        return await cursor.to_list(length=settings.simulator_shipper_count)
 
     async def find_online_shippers(self) -> List[dict]:
         """Get all online shippers."""
-        return await self.find_many({"signal_status": "ONLINE"})
+        return await self.find_many({
+            **self._active_shipper_filter(),
+            "signal_status": "ONLINE",
+        })
 
     async def find_available_shippers(self) -> List[dict]:
         """Get all available (IDLE) shippers."""
-        return await self.find_many({"current_status": "IDLE"})
+        return await self.find_many({
+            **self._active_shipper_filter(),
+            "current_status": "IDLE",
+        })
 
     async def find_delivering_shippers(self) -> List[dict]:
         """Get all shippers currently delivering."""
-        return await self.find_many({"current_status": "DELIVERING"})
+        return await self.find_many({
+            **self._active_shipper_filter(),
+            "current_status": "DELIVERING",
+        })
 
     async def find_by_status(self, status: str) -> List[dict]:
         """Find all shippers with given status."""
-        return await self.find_many({"current_status": status})
+        return await self.find_many({
+            **self._active_shipper_filter(),
+            "current_status": status,
+        })
 
     async def update_gps_state(
         self,
@@ -102,17 +121,21 @@ class ShipperRepository(BaseRepository):
 
     async def get_top_shippers(self, limit: int = 10) -> List[dict]:
         """Get top shippers by completed orders."""
-        cursor = self.collection.find({}).sort("completed_count", -1).limit(limit)
+        cursor = self.collection.find(
+            self._active_shipper_filter(), projection={"_id": 0}
+        ).sort([("completed_count", -1), ("shipper_id", 1)]).limit(limit)
         return await cursor.to_list(length=limit)
 
     async def get_stats(self) -> dict:
         """Get shipper fleet statistics."""
-        total = await self.count()
-        online = await self.count({"signal_status": "ONLINE"})
-        delivering = await self.count({"current_status": "DELIVERING"})
+        shipper_filter = self._active_shipper_filter()
+        total = await self.count(shipper_filter)
+        online = await self.count({**shipper_filter, "signal_status": "ONLINE"})
+        delivering = await self.count({**shipper_filter, "current_status": "DELIVERING"})
 
         # Total distance (sum all shippers)
         result = await self.collection.aggregate([
+            {"$match": shipper_filter},
             {"$group": {"_id": None, "total_km": {"$sum": "$total_distance_km"}}}
         ]).to_list(length=1)
 

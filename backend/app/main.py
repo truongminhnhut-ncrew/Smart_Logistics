@@ -16,8 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.db import connect_to_mongo, close_mongo_connection, get_db
-from app.presentation.websocket.manager import ws_manager
-from app.presentation.api.routers import shippers, orders, dashboard
+from app.presentation.websocket.manager import ingest_ws_manager, client_ws_manager
+from app.presentation.api.routers import shippers, orders, dashboard, incidents
 from app.application.services import GPSService
 from app.domain import GPSStreamPayload
 
@@ -63,19 +63,24 @@ app.add_middleware(
 app.include_router(shippers.router)
 app.include_router(orders.router)
 app.include_router(dashboard.router)
+app.include_router(incidents.router)
 
 
 # ── HEALTH CHECK ───────────────────────────────────────
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "ws_connections": ws_manager.get_connection_count()}
+    return {
+        "status": "ok",
+        "ws_ingest_connections": ingest_ws_manager.get_connection_count(),
+        "ws_client_connections": client_ws_manager.get_connection_count(),
+    }
 
 
 # ── WEBSOCKET ENDPOINTS ────────────────────────────────
 
 @app.websocket("/ws/ingest")
-async def websocket_gps_ingest(websocket: WebSocket, db=Depends(get_db)):
+async def websocket_gps_ingest(websocket: WebSocket):
     """
     WebSocket endpoint for GPS stream ingest.
 
@@ -84,28 +89,41 @@ async def websocket_gps_ingest(websocket: WebSocket, db=Depends(get_db)):
 
     Message format: {"shipper_id", "lat", "lon", "timestamp"}
     """
-    await ws_manager.connect(websocket)
+    logger.info("🔌 [WebSocket] New GPS ingest connection")
+    await ingest_ws_manager.connect(websocket)
 
     try:
+        db = await get_db()
         gps_service = GPSService(db)
+        message_count = 0
 
         while True:
             # Receive GPS data from simulator
-            data = await websocket.receive_json()
-
-            # Parse as GPS payload
             try:
-                gps_payload = GPSStreamPayload(**data)
-                # Process through 9-step pipeline
-                await gps_service.process_gps_stream(gps_payload)
+                data = await websocket.receive_json()
+                message_count += 1
+
+                # Parse as GPS payload
+                try:
+                    gps_payload = GPSStreamPayload(**data)
+                    # Process through 9-step pipeline
+                    result = await gps_service.process_gps_stream(gps_payload)
+
+                    if message_count % 100 == 0:
+                        logger.info(f"[GPS] Processed {message_count} messages ✅")
+
+                except Exception as e:
+                    logger.error(f"[GPS Processing] Error: {e}", exc_info=True)
+                    continue
             except Exception as e:
-                logger.error(f"[GPS Processing] Error: {e}")
-                continue
+                logger.error(f"[WebSocket Receive] Error: {e}", exc_info=True)
+                break
 
     except Exception as e:
-        logger.warning(f"[WebSocket] Connection error: {e}")
+        logger.warning(f"[WebSocket] Connection error: {e}", exc_info=True)
     finally:
-        await ws_manager.disconnect(websocket)
+        await ingest_ws_manager.disconnect(websocket)
+        logger.info(f"❌ [WebSocket] GPS ingest connection closed (processed {message_count} messages)")
 
 
 @app.websocket("/ws")
@@ -122,10 +140,23 @@ async def websocket_client(websocket: WebSocket):
         "eta_minutes", "order_id", "order_status", "delay_minutes", "timestamp"
     }
     """
-    await ws_manager.connect(websocket)
+    await client_ws_manager.connect(websocket)
 
     try:
-        # Keep connection alive
+        # STEP 1: Send initial snapshot to this client
+        db = await get_db()
+        from app.infrastructure.repositories import ShipperRepository
+        shipper_repo = ShipperRepository(db)
+        shippers = await shipper_repo.find_all()
+
+        init_payload = {
+            "type": "init",
+            "shippers": shippers
+        }
+        await websocket.send_json(init_payload)
+        logger.info(f"[WebSocket] Sent init snapshot with {len(shippers)} shippers")
+
+        # STEP 2: Keep connection alive
         while True:
             data = await websocket.receive_text()
             # Frontend just listens, doesn't send
@@ -134,7 +165,7 @@ async def websocket_client(websocket: WebSocket):
     except Exception as e:
         logger.debug(f"[Frontend WebSocket] Client disconnected: {e}")
     finally:
-        await ws_manager.disconnect(websocket)
+        await client_ws_manager.disconnect(websocket)
 
 
 # ── ROOT ───────────────────────────────────────────────

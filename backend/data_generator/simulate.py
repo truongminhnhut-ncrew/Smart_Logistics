@@ -10,6 +10,7 @@ import math
 import random
 import logging
 import os
+import httpx
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 # ── CONFIG ──────────────────────────────────────────────
 BACKEND_WS_URL    = os.getenv("BACKEND_WS_URL", "ws://localhost:8000/ws/ingest")
-SHIPPER_COUNT     = int(os.getenv("SIMULATOR_SHIPPER_COUNT", "100"))
+BACKEND_API_URL   = os.getenv("BACKEND_API_URL", "http://localhost:8000")
+SHIPPER_COUNT     = int(os.getenv("SIMULATOR_SHIPPER_COUNT", "30"))
 GPS_INTERVAL      = float(os.getenv("SIMULATOR_GPS_INTERVAL", "1.0"))  # giây
 DROPOUT_PROB      = 0.02   # 2% xác suất mất GPS mỗi giây
 
@@ -28,9 +30,9 @@ DROPOUT_PROB      = 0.02   # 2% xác suất mất GPS mỗi giây
 LAT_MIN, LAT_MAX = 10.65, 10.90
 LON_MIN, LON_MAX = 106.55, 106.85
 
-# Tốc độ xe máy điển hình TP.HCM: 20–50 km/h
-SPEED_MIN_KMPH = 20
-SPEED_MAX_KMPH = 50
+# Tăng tốc độ để shipper di chuyển rõ rệt hơn trên bản đồ
+SPEED_MIN_KMPH = 30
+SPEED_MAX_KMPH = 60
 
 
 # ── SHIPPER DATA CLASS ──────────────────────────────────
@@ -41,12 +43,29 @@ class VirtualShipper:
     lon: float
     speed_kmh: float = 30.0
     heading: float = 0.0   # degrees, 0 = North
+    target_lat: Optional[float] = None
+    target_lon: Optional[float] = None
     online: bool = True
 
     def move(self, dt_seconds: float = 1.0):
         """Di chuyển shipper theo hướng + tốc độ hiện tại."""
         if not self.online:
             return
+
+        # Nếu có mục tiêu (ví dụ: Kho hàng), điều chỉnh heading về phía mục tiêu
+        if self.target_lat and self.target_lon:
+            dy = self.target_lat - self.lat
+            dx = self.target_lon - self.lon
+            target_heading = math.degrees(math.atan2(dx, dy)) % 360
+            # Xoay dần heading về hướng mục tiêu
+            diff = (target_heading - self.heading + 180) % 360 - 180
+            self.heading = (self.heading + diff * 0.5) % 360
+            
+            # Nếu đã đến gần mục tiêu (< 10m), dừng lại hoặc chờ lệnh tiếp theo
+            dist = math.sqrt(dx**2 + dy**2)
+            if dist < 0.0001: # Khoảng 10-15m
+                self.speed_kmh = 0
+                return
 
         # Tính delta vị trí
         speed_ms = self.speed_kmh / 3.6
@@ -66,7 +85,7 @@ class VirtualShipper:
             self.lon = max(LON_MIN, min(LON_MAX, self.lon))
 
         # Heading drift: thay đổi nhẹ mỗi giây để trông tự nhiên
-        self.heading = (self.heading + random.uniform(-5, 5)) % 360
+        self.heading = (self.heading + random.uniform(-15, 15)) % 360
 
         # Tốc độ thay đổi nhẹ
         self.speed_kmh = max(SPEED_MIN_KMPH, min(SPEED_MAX_KMPH,
@@ -108,8 +127,23 @@ async def run_simulation():
 
                 while True:
                     tick += 1
-                    payloads = []
+                    
+                    # Mỗi 5 giây cập nhật trạng thái/mục tiêu từ API để biết ai cần về kho
+                    if tick % 5 == 1:
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                r = await client.get(f"{BACKEND_API_URL}/shippers")
+                                if r.status_code == 200:
+                                    shippers_db = {s['shipper_id']: s for s in r.json()}
+                                    for s in shippers:
+                                        db_data = shippers_db.get(s.shipper_id)
+                                        if db_data and db_data.get('target_lat'):
+                                            s.target_lat = db_data['target_lat']
+                                            s.target_lon = db_data['target_lon']
+                                            s.speed_kmh = 45.0 # Chạy nhanh về kho
+                        except Exception: pass
 
+                    payloads = []
                     for shipper in shippers:
                         # Simulate GPS dropout
                         shipper.online = random.random() > DROPOUT_PROB

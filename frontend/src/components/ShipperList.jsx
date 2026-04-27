@@ -2,9 +2,9 @@
  * components/ShipperList.jsx — Left panel shipper list
  */
 
-export const ShipperList = ({ shippers = [], selectedId, onSelect }) => {
+export const ShipperList = ({ shippers = [], selectedId, onSelect, compact = false, mobile = false }) => {
   return (
-    <div style={styles.container}>
+    <div style={styles.container(compact, mobile)}>
       <h2 style={styles.title}>Shippers ({shippers.length})</h2>
       <div style={styles.list}>
         {shippers.map(shipper => (
@@ -34,12 +34,14 @@ const statusColors = {
 }
 
 const styles = {
-  container: {
-    width: '250px',
-    borderRight: '1px solid var(--border)',
+  container: (compact, mobile) => ({
+    width: mobile ? '100%' : compact ? 220 : 250,
+    minWidth: mobile ? 0 : compact ? 220 : 250,
+    borderRight: mobile ? 'none' : '1px solid var(--border)',
+    borderBottom: mobile ? '1px solid var(--border)' : 'none',
     padding: 'var(--spacing-lg)',
     overflow: 'auto',
-  },
+  }),
   title: { fontSize: 'var(--font-size-lg)', marginBottom: 'var(--spacing-md)', margin: 0 },
   list: { display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' },
   item: (selected) => ({

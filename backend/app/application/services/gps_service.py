@@ -11,7 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.domain import Shipper, Order, TrackingEvent, GPSStreamPayload
 from app.infrastructure.repositories import ShipperRepository, OrderRepository, TrackingEventRepository
 from app.utils import haversine_km, compute_speed, compute_heading, interpolate, compute_eta_minutes
-from app.presentation.websocket.manager import ws_manager
+from app.presentation.websocket.manager import client_ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -79,71 +79,94 @@ class GPSService:
         # ══════════════════════════════════════
         # STEP 3: COMPUTE SPEED + HEADING
         # ══════════════════════════════════════
-        prev_event = await self.event_repo.find_shipper_last_location(shipper_id)
-        if prev_event:
-            prev_ts = prev_event["timestamp"].timestamp()
-            curr_ts = now.timestamp()
+        try:
+            prev_event = await self.event_repo.find_shipper_last_location(shipper_id)
+            if prev_event:
+                prev_ts = prev_event["timestamp"].timestamp()
+                curr_ts = now.timestamp()
 
-            event["speed_kmh"] = compute_speed(
-                prev_event["lat"], prev_event["lon"], prev_ts,
-                lat, lon, curr_ts,
-            )
-            event["heading"] = compute_heading(prev_event["lat"], prev_event["lon"], lat, lon)
-            event["distance_moved_km"] = haversine_km(prev_event["lat"], prev_event["lon"], lat, lon)
+                event["speed_kmh"] = compute_speed(
+                    prev_event["lat"], prev_event["lon"], prev_ts,
+                    lat, lon, curr_ts,
+                )
+                event["heading"] = compute_heading(prev_event["lat"], prev_event["lon"], lat, lon)
+                event["distance_moved_km"] = haversine_km(prev_event["lat"], prev_event["lon"], lat, lon)
+        except Exception as e:
+            logger.error(f"[GPS Step 3] Speed/heading calc failed: {e}")
 
         # ══════════════════════════════════════
         # STEP 4: LINEAR INTERPOLATION
         # ══════════════════════════════════════
-        if prev_event:
-            smooth_lat, smooth_lon = interpolate(
-                prev_event["lat"], prev_event["lon"],
-                lat, lon,
-                t=0.5,
-            )
-            event["smooth_lat"] = smooth_lat
-            event["smooth_lon"] = smooth_lon
+        try:
+            if prev_event:
+                smooth_lat, smooth_lon = interpolate(
+                    prev_event["lat"], prev_event["lon"],
+                    lat, lon,
+                    t=0.5,
+                )
+                event["smooth_lat"] = smooth_lat
+                event["smooth_lon"] = smooth_lon
+        except Exception as e:
+            logger.error(f"[GPS Step 4] Interpolation failed: {e}")
 
         # ══════════════════════════════════════
         # STEP 5: FETCH ACTIVE ORDER + COMPUTE ETA
         # ══════════════════════════════════════
-        active_order = await self.order_repo.find_active_order(shipper_id)
-        if active_order:
-            event["order_id"] = active_order.get("order_id")
-            eta = compute_eta_minutes(
-                event["smooth_lat"], event["smooth_lon"],
-                active_order["dest_lat"], active_order["dest_lon"],
-                event["speed_kmh"],
-            )
-            event["eta_minutes"] = eta
+        try:
+            active_order = await self.order_repo.find_active_order(shipper_id)
+            if active_order:
+                event["order_id"] = active_order.get("order_id")
+                eta = compute_eta_minutes(
+                    event["smooth_lat"], event["smooth_lon"],
+                    active_order["dest_lat"], active_order["dest_lon"],
+                    event["speed_kmh"],
+                )
+                event["eta_minutes"] = eta
 
-            # Calculate delay vs SLA
-            promised_at = active_order.get("promised_delivery_at")
-            if promised_at:
-                minutes_left = (promised_at - now).total_seconds() / 60
-                event["delay_minutes"] = max(0, int(eta - minutes_left))
+                # Calculate delay vs SLA
+                promised_at = active_order.get("promised_delivery_at")
+                if promised_at:
+                    minutes_left = (promised_at - now).total_seconds() / 60
+                    event["delay_minutes"] = max(0, int(eta - minutes_left))
+        except Exception as e:
+            logger.error(f"[GPS Step 5] Order fetch failed: {e}")
 
         # ══════════════════════════════════════
         # STEP 6: SAVE TO MONGODB (APPEND-ONLY)
         # ══════════════════════════════════════
-        await self.event_repo.append_event(event)
+        try:
+            await self.event_repo.append_event(event)
+        except Exception as e:
+            logger.error(f"[GPS Step 6] Event save failed: {e}")
+            return None
 
         # ══════════════════════════════════════
         # STEP 7: CASCADE UPDATE (shipper + order)
         # ══════════════════════════════════════
-        await self._update_shipper_state(event)
-        if active_order:
-            await self._update_order_state(event, active_order)
+        try:
+            await self._update_shipper_state(event)
+            if active_order:
+                await self._update_order_state(event, active_order)
+        except Exception as e:
+            logger.error(f"[GPS Step 7] Cascade update failed: {e}")
 
         # ══════════════════════════════════════
         # STEP 8: WEBSOCKET BROADCAST
         # ══════════════════════════════════════
-        await self._broadcast_realtime(event, active_order)
+        try:
+            await self._broadcast_realtime(event, active_order)
+        except Exception as e:
+            logger.error(f"[GPS Step 8] Broadcast failed: {e}")
 
         # ══════════════════════════════════════
         # STEP 9: DECISION ENGINE (ALERTS)
         # ══════════════════════════════════════
-        await self._evaluate_rules(event, active_order)
+        try:
+            await self._evaluate_rules(event, active_order)
+        except Exception as e:
+            logger.error(f"[GPS Step 9] Rule evaluation failed: {e}")
 
+        logger.debug(f"[GPS] {shipper_id} processed: lat={lat}, lon={lon}, speed={event['speed_kmh']:.1f}km/h")
         return event
 
     async def _update_shipper_state(self, event: dict) -> None:
@@ -182,7 +205,7 @@ class GPSService:
             "delay_minutes": event.get("delay_minutes", 0),
             "timestamp": event["timestamp"].isoformat(),
         }
-        await ws_manager.broadcast(payload)
+        await client_ws_manager.broadcast(payload)
 
     async def _evaluate_rules(self, event: dict, order: Optional[dict]) -> None:
         """STEP 9: Decision engine — check alert conditions."""
@@ -194,7 +217,7 @@ class GPSService:
                 f"[ALERT] Shipper {event['shipper_id']} delayed {event['delay_minutes']}min "
                 f"| Order {order.get('order_id')}"
             )
-            await ws_manager.broadcast({
+            await client_ws_manager.broadcast({
                 "type": "ALERT",
                 "alert_type": "DELIVERY_DELAY",
                 "shipper_id": event["shipper_id"],

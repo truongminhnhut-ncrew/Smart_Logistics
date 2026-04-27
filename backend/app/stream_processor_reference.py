@@ -9,6 +9,7 @@ Mục tiêu performance: < 200ms từ nhận GPS → Dashboard hiển thị.
 import uuid
 import logging
 from datetime import datetime, timezone
+import random
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -98,7 +99,7 @@ async def process_gps_event(db: AsyncIOMotorDatabase, gps_data: dict) -> Optiona
         smooth_lat, smooth_lon = interpolate(
             prev_event["lat"], prev_event["lon"],
             lat, lon,
-            t=0.5,
+            t=0.8,
         )
         event["smooth_lat"] = smooth_lat
         event["smooth_lon"] = smooth_lon
@@ -157,14 +158,17 @@ async def process_gps_event(db: AsyncIOMotorDatabase, gps_data: dict) -> Optiona
 
 async def _get_last_event(db: AsyncIOMotorDatabase, shipper_id: str) -> Optional[dict]:
     """Lấy tracking event gần nhất của shipper (query riêng, không $lookup)."""
-    return await db.tracking_events.find_one(
+    cursor = db.tracking_events.find(
         {"shipper_id": shipper_id, "event_type": "LOCATION_UPDATE"},
-        sort=[("timestamp", -1)],
-    )
+        projection={"_id": 0}
+    ).sort("timestamp", -1).limit(1)
+
+    results = await cursor.to_list(length=1)
+    return results[0] if results else None
 
 
 async def _get_active_order(db: AsyncIOMotorDatabase, shipper_id: str) -> Optional[dict]:
-    """Lấy đơn hàng đang giao (IN_TRANSIT) của shipper."""
+    """Lấy đơn hàng đang giao (IN_TRANSIT hoặc PICKED_UP) của shipper."""
     return await db.orders.find_one({
         "assigned_shipper_id": shipper_id,
         "current_status": {"$in": ["IN_TRANSIT", "PICKED_UP"]},
@@ -175,17 +179,25 @@ async def _update_shipper_state(db: AsyncIOMotorDatabase, event: dict):
     """Cập nhật GPS live + trạng thái shipper (BƯỚC 7a)."""
     await db.shippers.update_one(
         {"shipper_id": event["shipper_id"]},
-        {"$set": {
-            "current_lat":       event["smooth_lat"],
-            "current_lon":       event["smooth_lon"],
-            "current_speed_kmh": event["speed_kmh"],
-            "heading":           event["heading"],
-            "signal_status":     "ONLINE",
-            "current_status":    "DELIVERING",
-            "last_ping_at":      event["timestamp"],
-            "updated_at":        event["timestamp"],
-        }},
-        upsert=True,  # shipper có thể chưa tồn tại khi nhận GPS đầu tiên
+        {
+            "$set": {
+                "current_lat":       event["smooth_lat"],
+                "current_lon":       event["smooth_lon"],
+                "current_speed_kmh": event["speed_kmh"],
+                "heading":           event["heading"],
+                "last_ping_at":      event["timestamp"],
+                "updated_at":        event["timestamp"],
+                "signal_status":     "ONLINE"
+            },
+            "$setOnInsert": {
+                "name": f"Tài xế {event['shipper_id'][-3:]}",
+                "phone_number": "09" + "".join([str(random.randint(0,9)) for _ in range(8)]),
+                "vehicle_type": "motorbike",
+                "current_status": "IDLE",
+                "created_at": event["timestamp"]
+            }
+        },
+        upsert=True
     )
 
 

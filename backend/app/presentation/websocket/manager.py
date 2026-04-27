@@ -6,7 +6,7 @@ Manages active WebSocket connections and broadcasts GPS updates to all clients.
 
 import logging
 import json
-from typing import List, Set
+from typing import List
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -87,5 +87,6 @@ class ConnectionManager:
         return len(self.active_connections)
 
 
-# Global manager instance
-ws_manager = ConnectionManager()
+# Separate managers for GPS ingest and frontend subscribers.
+ingest_ws_manager = ConnectionManager()
+client_ws_manager = ConnectionManager()

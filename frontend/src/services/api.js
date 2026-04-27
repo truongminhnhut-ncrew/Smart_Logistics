@@ -43,4 +43,18 @@ export const dashboardAPI = {
     api.get(`/stats/recent-events?minutes=${minutes}&limit=${limit}`),
 }
 
+// Incidents API
+export const incidentsAPI = {
+  create: (data) => api.post('/incidents', data),
+  getById: (id) => api.get(`/incidents/${id}`),
+  getByShipper: (shipperId, limit = 100) =>
+    api.get(`/incidents/shipper/${shipperId}?limit=${limit}`),
+  getRecentByShipper: (shipperId, limit = 5) =>
+    api.get(`/incidents/shipper/${shipperId}/recent?limit=${limit}`),
+  getUnresolved: () => api.get('/incidents'),
+  resolve: (id) => api.patch(`/incidents/${id}/resolve`),
+  getUnresolvedCount: () => api.get('/incidents/stats/unresolved-count'),
+  bulkImport: (incidents) => api.post('/incidents/bulk', { incidents }),
+}
+
 export default api

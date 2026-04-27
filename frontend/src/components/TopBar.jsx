@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from 'react'
 
-export const TopBar = ({ wsConnected, shipperCount }) => {
+export const TopBar = ({ wsConnected, shipperCount, totalShippers }) => {
   const [time, setTime] = useState(new Date())
 
   useEffect(() => {
@@ -28,7 +28,7 @@ export const TopBar = ({ wsConnected, shipperCount }) => {
         <div style={styles.statusDot(wsConnected)}>
           {wsConnected ? '🟢' : '🔴'}
         </div>
-        <span>{shipperCount}/100 online</span>
+        <span>{shipperCount}/{totalShippers || shipperCount} online</span>
       </div>
     </div>
   )
@@ -36,18 +36,19 @@ export const TopBar = ({ wsConnected, shipperCount }) => {
 
 const styles = {
   container: {
-    height: '46px',
+    minHeight: '46px',
     background: 'var(--bg2)',
     borderBottom: '1px solid var(--border)',
     display: 'flex',
     alignItems: 'center',
+    flexWrap: 'wrap',
     paddingLeft: 'var(--spacing-lg)',
     paddingRight: 'var(--spacing-lg)',
     justifyContent: 'space-between',
   },
   left: { flex: 0 },
-  center: { flex: 1, textAlign: 'center' },
-  right: { flex: 0, display: 'flex', gap: 'var(--spacing-md)', alignItems: 'center' },
+  center: { flex: 1, textAlign: 'center', minWidth: 120 },
+  right: { flex: 0, display: 'flex', gap: 'var(--spacing-md)', alignItems: 'center', fontSize: 'var(--font-size-sm)' },
   title: { fontSize: 'var(--font-size-xl)', margin: 0, color: 'var(--green)' },
   clock: { fontFamily: 'var(--mono)', color: 'var(--text2)' },
   statusDot: (active) => ({

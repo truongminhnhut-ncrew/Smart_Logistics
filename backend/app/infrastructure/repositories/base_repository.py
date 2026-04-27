@@ -30,16 +30,16 @@ class BaseRepository(Generic[T]):
 
     async def find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Find single document matching query."""
-        return await self.collection.find_one(query)
+        return await self.collection.find_one(query, projection={"_id": 0})
 
     async def find_many(self, query: Dict[str, Any], limit: int = 100, skip: int = 0) -> List[Dict[str, Any]]:
         """Find multiple documents matching query."""
-        cursor = self.collection.find(query).limit(limit).skip(skip)
+        cursor = self.collection.find(query, projection={"_id": 0}).limit(limit).skip(skip)
         return await cursor.to_list(length=limit)
 
     async def find_all(self) -> List[Dict[str, Any]]:
         """Find all documents."""
-        cursor = self.collection.find({})
+        cursor = self.collection.find({}, projection={"_id": 0})
         return await cursor.to_list(length=None)
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> int:

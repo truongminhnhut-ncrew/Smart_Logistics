@@ -22,7 +22,7 @@ export const RightPanel = ({ shipper = null }) => {
 
       <div style={styles.section}>
         <div style={styles.label}>Status</div>
-        <div style={[styles.value, styles.status(shipper.current_status)]}>
+        <div style={{ ...styles.value, ...styles.status(shipper.current_status) }}>
           {shipper.current_status}
         </div>
       </div>
@@ -61,8 +61,6 @@ export const RightPanel = ({ shipper = null }) => {
 
 const styles = {
   container: {
-    width: '272px',
-    borderLeft: '1px solid var(--border)',
     padding: 'var(--spacing-lg)',
     overflow: 'auto',
   },

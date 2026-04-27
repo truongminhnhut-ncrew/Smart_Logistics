@@ -46,6 +46,23 @@ class EventType(str, Enum):
     DELIVERY_COMPLETE = "DELIVERY_COMPLETE"
 
 
+class IncidentType(str, Enum):
+    """Incident/exception types."""
+    GPS_LOST = "GPS_LOST"
+    SHIPPER_LATE = "SHIPPER_LATE"
+    CUSTOMER_NOT_AVAILABLE = "CUSTOMER_NOT_AVAILABLE"
+    DELIVERY_REFUSED = "DELIVERY_REFUSED"
+    ACCIDENT = "ACCIDENT"
+    CUSTOMER_REFUSED = "CUSTOMER_REFUSED"
+
+
+class IncidentSeverity(str, Enum):
+    """Incident severity levels."""
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
 # ── DOMAIN ENTITIES ────────────────────────────────────
 
 class Shipper(BaseModel):
@@ -283,3 +300,44 @@ class AlertPayload(BaseModel):
     shipper_id: str
     order_id: Optional[str]
     message: str
+
+
+class Incident(BaseModel):
+    """
+    Incident/Exception domain entity.
+
+    Tracks special cases like GPS loss, delivery delays, accidents, etc.
+    """
+    incident_id: str = Field(..., description="Unique ID: INC-YYYYMMDD-XXXX")
+    shipper_id: str = Field(..., description="SHP-XXX")
+    order_id: Optional[str] = Field(default=None, description="Associated order if applicable")
+    incident_type: IncidentType = Field(...)
+    severity: IncidentSeverity = Field(default=IncidentSeverity.INFO)
+    description: str = Field(..., description="Human-readable incident description")
+    resolved: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    resolved_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "incident_id": "INC-20250427-0001",
+                "shipper_id": "SHP-001",
+                "order_id": "ORD-20250427-001",
+                "incident_type": "GPS_LOST",
+                "severity": "CRITICAL",
+                "description": "Shipper GPS signal lost for 5 minutes",
+                "resolved": False,
+                "created_at": "2025-04-27T12:30:00Z",
+            }
+        }
+
+
+class CreateIncidentRequest(BaseModel):
+    """Request to create incident."""
+    shipper_id: str
+    order_id: Optional[str] = None
+    incident_type: IncidentType
+    severity: IncidentSeverity = IncidentSeverity.INFO
+    description: str

@@ -2,7 +2,7 @@
  * components/Dashboard.jsx — Statistics dashboard
  */
 
-export const Dashboard = ({ stats = null }) => {
+export const Dashboard = ({ stats = null, compact = false }) => {
   if (!stats) {
     return (
       <div style={styles.container}>
@@ -15,7 +15,7 @@ export const Dashboard = ({ stats = null }) => {
     <div style={styles.container}>
       <h2 style={styles.title}>Dashboard</h2>
 
-      <div style={styles.grid}>
+      <div style={styles.grid(compact)}>
         <div style={styles.card}>
           <div style={styles.cardLabel}>Active Shippers</div>
           <div style={styles.cardValue}>{stats.fleet?.online_count || 0}</div>
@@ -52,7 +52,7 @@ export const Dashboard = ({ stats = null }) => {
           <h3 style={styles.sectionTitle}>Top Shippers</h3>
           <div style={styles.list}>
             {stats.top_shippers.map((s, i) => (
-              <div key={i} style={styles.listItem}>
+              <div key={i} style={styles.listItem(compact)}>
                 <span>{i + 1}. {s.shipper_id}</span>
                 <span style={styles.listValue}>{s.completed_count} orders</span>
               </div>
@@ -67,31 +67,35 @@ export const Dashboard = ({ stats = null }) => {
 const styles = {
   container: { padding: 'var(--spacing-lg)' },
   title: { fontSize: 'var(--font-size-lg)', marginBottom: 'var(--spacing-lg)', margin: 0 },
-  grid: {
+  grid: (compact) => ({
     display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
-    gap: 'var(--spacing-lg)',
+    gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))',
+    gap: compact ? 'var(--spacing-md)' : 'var(--spacing-lg)',
     marginBottom: 'var(--spacing-xl)',
-  },
+  }),
   card: {
     padding: 'var(--spacing-lg)',
     background: 'var(--bg2)',
     border: '1px solid var(--border)',
     borderRadius: 'var(--radius-md)',
+    minWidth: 0,
   },
   cardLabel: { fontSize: 'var(--font-size-sm)', color: 'var(--text2)', marginBottom: 'var(--spacing-md)' },
   cardValue: { fontSize: 'var(--font-size-xl)', color: 'var(--green)', fontWeight: 'bold' },
   section: { marginTop: 'var(--spacing-xl)' },
   sectionTitle: { fontSize: 'var(--font-size-lg)', marginBottom: 'var(--spacing-md)', margin: 0 },
   list: { display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' },
-  listItem: {
+  listItem: (compact) => ({
     display: 'flex',
     justifyContent: 'space-between',
+    alignItems: compact ? 'flex-start' : 'center',
+    flexDirection: compact ? 'column' : 'row',
+    gap: 'var(--spacing-xs)',
     padding: 'var(--spacing-md)',
     background: 'var(--bg2)',
     borderRadius: 'var(--radius-md)',
     fontSize: 'var(--font-size-sm)',
-  },
+  }),
   listValue: { color: 'var(--green)', fontWeight: 'bold' },
   placeholder: { textAlign: 'center', color: 'var(--text2)' },
 }

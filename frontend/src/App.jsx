@@ -2,9 +2,9 @@
  * App.jsx — Main React application
  *
  * 3-panel layout:
- * - Left: Shipper list
- * - Center: Leaflet map
- * - Right: Shipper details + Dashboard
+ * - Left: Shipper list (250px)
+ * - Center: Leaflet map (flex: 1)
+ * - Right: Dashboard stats + Shipper details (272px)
  */
 
 import { useState, useEffect } from 'react'
@@ -19,10 +19,16 @@ import { shippersAPI, dashboardAPI } from './services/api'
 import './styles/theme.css'
 
 function App() {
-  const [showDashboard, setShowDashboard] = useState(false)
   const [stats, setStats] = useState(null)
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
   const ws = useWebSocket()
   const { shippers, selectedShipperId, setSelectedShipperId, updateShipperLocation, setShippersList, shipper_list } = useShippers()
+
+  useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth)
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   // Load initial shippers list
   useEffect(() => {
@@ -38,16 +44,22 @@ function App() {
     loadShippers()
   }, [])
 
-  // Subscribe to WebSocket GPS updates
+  // Subscribe to WebSocket messages
   useEffect(() => {
     const unsubscribe = ws.subscribe((message) => {
-      if (message.shipper_id) {
+      // Handle init snapshot
+      if (message.type === 'init' && message.shippers) {
+        console.log('[App] Received init snapshot with', message.shippers.length, 'shippers')
+        setShippersList(message.shippers)
+      }
+      // Handle location updates
+      else if (message.shipper_id) {
         updateShipperLocation(message)
       }
     })
 
     return unsubscribe
-  }, [ws, updateShipperLocation])
+  }, [ws, updateShipperLocation, setShippersList])
 
   // Load dashboard stats
   useEffect(() => {
@@ -66,36 +78,35 @@ function App() {
   }, [])
 
   const selectedShipper = selectedShipperId ? shippers.get(selectedShipperId) : null
+  const isCompact = windowWidth < 1180
+  const isMobile = windowWidth < 768
+  const rightPanelWidth = isMobile ? '100%' : isCompact ? 320 : 360
 
   return (
     <div style={styles.app}>
-      <TopBar wsConnected={ws.isConnected} shipperCount={shippers.size} />
+      <TopBar
+        wsConnected={ws.isConnected}
+        shipperCount={stats?.fleet?.online_count ?? shippers.size}
+        totalShippers={stats?.fleet?.total_shippers ?? shippers.size}
+      />
 
-      <div style={styles.mainContent}>
+      <div style={styles.mainContent(isMobile)}>
+        {/* LEFT PANEL: Shipper List */}
         <ShipperList
           shippers={shipper_list}
           selectedId={selectedShipperId}
           onSelect={setSelectedShipperId}
+          compact={isCompact}
+          mobile={isMobile}
         />
 
-        {showDashboard ? (
-          <Dashboard stats={stats} />
-        ) : (
-          <MapView shippers={shipper_list} selectedId={selectedShipperId} />
-        )}
+        {/* CENTER PANEL: Map (Always visible) */}
+        <MapView shippers={shipper_list} selectedId={selectedShipperId} compact={isMobile} />
 
-        <div style={styles.rightPanel}>
-          <button
-            style={styles.tabButton}
-            onClick={() => setShowDashboard(!showDashboard)}
-          >
-            {showDashboard ? 'Map' : 'Dashboard'}
-          </button>
-          {showDashboard ? (
-            <Dashboard stats={stats} />
-          ) : (
-            <RightPanel shipper={selectedShipper} />
-          )}
+        {/* RIGHT PANEL: Dashboard + Details */}
+        <div style={styles.rightPanel(isMobile, rightPanelWidth)}>
+          <Dashboard stats={stats} compact={isCompact} />
+          <RightPanel shipper={selectedShipper} />
         </div>
       </div>
     </div>
@@ -110,25 +121,24 @@ const styles = {
     background: 'var(--bg)',
     color: 'var(--text)',
   },
-  mainContent: {
+  mainContent: (isMobile) => ({
     display: 'flex',
     flex: 1,
     overflow: 'hidden',
-  },
-  rightPanel: {
-    position: 'relative',
-  },
-  tabButton: {
-    padding: 'var(--spacing-sm) var(--spacing-md)',
-    margin: 'var(--spacing-md)',
-    background: 'var(--green)',
-    color: 'var(--bg)',
-    border: 'none',
-    borderRadius: 'var(--radius-md)',
-    cursor: 'pointer',
-    fontWeight: 'bold',
-    fontSize: 'var(--font-size-sm)',
-  },
+    gap: 0,
+    flexDirection: isMobile ? 'column' : 'row',
+  }),
+  rightPanel: (isMobile, width) => ({
+    width,
+    minWidth: isMobile ? 0 : width,
+    maxWidth: isMobile ? '100%' : width,
+    borderLeft: isMobile ? 'none' : '1px solid var(--border)',
+    borderTop: isMobile ? '1px solid var(--border)' : 'none',
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    background: 'var(--bg)',
+  }),
 }
 
 export default App

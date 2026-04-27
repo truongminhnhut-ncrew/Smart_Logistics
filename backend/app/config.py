@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # ── Data Generator ───────────────────────────
     backend_ws_url: str = Field(default="ws://localhost:8000/ws/ingest", env="BACKEND_WS_URL")
-    simulator_shipper_count: int = Field(default=100, env="SIMULATOR_SHIPPER_COUNT")
+    simulator_shipper_count: int = Field(default=30, env="SIMULATOR_SHIPPER_COUNT")
     simulator_gps_interval: float = Field(default=1.0, env="SIMULATOR_GPS_INTERVAL")
 
     # ── Business Rules ───────────────────────────
