@@ -1,44 +1,33 @@
 """
-presentation/api/routers/dashboard.py — Dashboard statistics endpoints.
+Dashboard statistics endpoints.
 """
+
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.db import get_db
-from app.infrastructure.repositories import ShipperRepository, OrderRepository, TrackingEventRepository
+from app.infrastructure.repositories import OrderRepository, ShipperRepository, TrackingEventRepository
 
 router = APIRouter(prefix="/stats", tags=["dashboard"])
 
 
 @router.get("/overview", response_model=dict)
 async def get_overview(db: AsyncIOMotorDatabase = Depends(get_db)):
-    """
-    Get dashboard overview stats.
-
-    Returns:
-    - Active shipper count
-    - Total distance traveled
-    - Pending orders
-    - Top shippers
-    """
+    """Get dashboard overview stats sourced from MongoDB."""
     shipper_repo = ShipperRepository(db)
     order_repo = OrderRepository(db)
 
-    # Fleet stats
     fleet_stats = await shipper_repo.get_stats()
-
-    # Orders stats
     total_orders = await order_repo.count()
     pending_orders = await order_repo.count({"current_status": "PENDING"})
     in_transit = await order_repo.count({"current_status": "IN_TRANSIT"})
     delivered = await order_repo.count({"current_status": "DELIVERED"})
-
-    # Top shippers
     top_shippers = await shipper_repo.get_top_shippers(limit=5)
 
     return {
-        "timestamp": "2025-01-01T12:00:00Z",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "fleet": fleet_stats,
         "orders": {
             "total": total_orders,
@@ -48,12 +37,12 @@ async def get_overview(db: AsyncIOMotorDatabase = Depends(get_db)):
         },
         "top_shippers": [
             {
-                "shipper_id": s.get("shipper_id"),
-                "name": s.get("name"),
-                "completed_count": s.get("completed_count"),
-                "total_distance_km": s.get("total_distance_km"),
+                "shipper_id": shipper.get("shipper_id"),
+                "name": shipper.get("name"),
+                "completed_count": shipper.get("completed_count", 0),
+                "total_distance_km": shipper.get("total_distance_km", 0.0),
             }
-            for s in top_shippers
+            for shipper in top_shippers
         ],
     }
 
@@ -76,9 +65,8 @@ async def get_tracking_stats(db: AsyncIOMotorDatabase = Depends(get_db)):
 async def get_recent_events(
     minutes: int = 5,
     limit: int = 100,
-    db: AsyncIOMotorDatabase = Depends(get_db)
+    db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    """Get recent GPS events from last N minutes."""
+    """Get recent GPS events from the last N minutes."""
     repo = TrackingEventRepository(db)
-    events = await repo.find_recent_events(minutes=minutes, limit=limit)
-    return events
+    return await repo.find_recent_events(minutes=minutes, limit=limit)

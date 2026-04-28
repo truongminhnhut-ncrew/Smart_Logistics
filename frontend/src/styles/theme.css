@@ -47,6 +47,8 @@
   --z-modal: 2000;
 }
 
+
+
 /* ── RESET & BASE STYLES ────────────────────────────── */
 
 * {
@@ -167,4 +169,18 @@ html, body, #root {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text2);
+}
+
+
+.leaflet-container {
+    height: 100vh !important; /* Hoặc 500px */
+    width: 100%;
+    background-color: #08090b;
+}
+
+/* Đảm bảo container bọc MapView cũng có chiều cao */
+.map-wrapper {
+    height: 100%;
+    width: 100%;
+    min-height: 500px;
 }

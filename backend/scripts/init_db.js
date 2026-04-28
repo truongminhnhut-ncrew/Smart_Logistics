@@ -25,7 +25,8 @@ db.orders.createIndex({ warehouse_id: 1 });
 db.orders.createIndex({ promised_delivery_at: 1 });
 
 // TrackingEvents: Append-only with TTL
-db.tracking_events.createIndex({ shipper_id: 1 });
+db.tracking_events.createIndex({ shipper_id: 1, timestamp: -1 });
+db.tracking_events.createIndex({ shipper_id: 1, event_type: 1, timestamp: -1 });
 db.tracking_events.createIndex({ order_id: 1 });
 // TTL index: auto-delete after 7 days (timestamp only - no duplicate!)
 db.tracking_events.createIndex(

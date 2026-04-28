@@ -29,17 +29,17 @@ class BaseRepository(Generic[T]):
         return [str(id_) for id_ in result.inserted_ids]
 
     async def find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Find single document matching query."""
-        return await self.collection.find_one(query)
+        """Find single document matching query — _id excluded."""
+        return await self.collection.find_one(query, {"_id": 0})
 
     async def find_many(self, query: Dict[str, Any], limit: int = 100, skip: int = 0) -> List[Dict[str, Any]]:
-        """Find multiple documents matching query."""
-        cursor = self.collection.find(query).limit(limit).skip(skip)
+        """Find multiple documents matching query — _id excluded."""
+        cursor = self.collection.find(query, {"_id": 0}).limit(limit).skip(skip)
         return await cursor.to_list(length=limit)
 
     async def find_all(self) -> List[Dict[str, Any]]:
-        """Find all documents."""
-        cursor = self.collection.find({})
+        """Find all documents — _id excluded."""
+        cursor = self.collection.find({}, {"_id": 0})
         return await cursor.to_list(length=None)
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> int:

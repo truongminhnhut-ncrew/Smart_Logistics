@@ -19,8 +19,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # ── CONFIG ──────────────────────────────────────────────
-BACKEND_WS_URL    = os.getenv("BACKEND_WS_URL", "ws://localhost:8000/ws/ingest")
-SHIPPER_COUNT     = int(os.getenv("SIMULATOR_SHIPPER_COUNT", "100"))
+# Khi chạy trong Docker, cần dùng tên service 'backend' thay vì 'localhost'
+BACKEND_WS_URL    = os.getenv("BACKEND_WS_URL", "ws://backend:8000/ws/ingest")
+SHIPPER_COUNT     = int(os.getenv("SIMULATOR_SHIPPER_COUNT", "30"))
 GPS_INTERVAL      = float(os.getenv("SIMULATOR_GPS_INTERVAL", "1.0"))  # giây
 DROPOUT_PROB      = 0.02   # 2% xác suất mất GPS mỗi giây
 
@@ -42,11 +43,24 @@ class VirtualShipper:
     speed_kmh: float = 30.0
     heading: float = 0.0   # degrees, 0 = North
     online: bool = True
+    target_lat: Optional[float] = None
+    target_lon: Optional[float] = None
 
     def move(self, dt_seconds: float = 1.0):
         """Di chuyển shipper theo hướng + tốc độ hiện tại."""
         if not self.online:
             return
+
+        # Nếu có mục tiêu (về kho hoặc giao hàng), xoay hướng về phía mục tiêu
+        if self.target_lat and self.target_lon:
+            dy = self.target_lat - self.lat
+            dx = self.target_lon - self.lon
+            dist = math.sqrt(dx**2 + dy**2)
+            if dist > 0.0001: # Nếu cách mục tiêu > 10m
+                target_heading = math.degrees(math.atan2(dx, dy)) % 360
+                # Nội suy hướng đi (xoay từ từ)
+                self.heading = (self.heading + (target_heading - self.heading) * 0.2) % 360
+                self.speed_kmh = 45.0 # Chạy nhanh về kho
 
         # Tính delta vị trí
         speed_ms = self.speed_kmh / 3.6
