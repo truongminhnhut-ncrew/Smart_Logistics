@@ -16,6 +16,7 @@ from app.db import get_db
 from app.domain import CreateIncidentRequest
 from app.infrastructure.repositories import IncidentRepository
 from app.presentation.websocket.manager import ws_manager
+from app.application.services.simulation_engine import simulation_engine
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -27,6 +28,7 @@ async def create_incident(
 ):
     """
     Tạo sự cố mới và broadcast realtime lên tất cả clients.
+    Cập nhật shipper state qua simulation_engine.apply_incident().
     """
     incident_id = f"INC-{str(uuid.uuid4())[:6].upper()}"
     repo = IncidentRepository(db)
@@ -39,6 +41,13 @@ async def create_incident(
         order_id=req.order_id,
     )
 
+    # Update shipper state via simulation engine
+    result = simulation_engine.apply_incident(
+        req.shipper_id,
+        req.incident_type.value,
+        rain_level=req.description if req.incident_type.value == "HEAVY_RAIN" else "MEDIUM"
+    )
+
     # Broadcast realtime notification
     incident_data = {
         "type": "incident_created",
@@ -48,6 +57,9 @@ async def create_incident(
         "incident_type": req.incident_type.value,
         "description": req.description,
         "status": "ACTIVE",
+        "severity": result.get("severity"),
+        "estimated_delay": result.get("estimated_delay"),
+        "recommended_action": result.get("recommended_action"),
     }
     await ws_manager.broadcast_clients(incident_data)
 
@@ -56,7 +68,9 @@ async def create_incident(
         "status": "created",
         "shipper_id": req.shipper_id,
         "incident_type": req.incident_type.value,
+        "recommended_action": result.get("recommended_action"),
     }
+
 
 
 @router.get("")

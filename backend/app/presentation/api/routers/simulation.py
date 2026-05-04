@@ -38,14 +38,37 @@ class DeliveryRequest(BaseModel):
     note: Optional[str] = None
 
 
+class IncidentRequest(BaseModel):
+    shipper_id: str
+    incident_type: str
+    rain_level: str = "MEDIUM"
+
+
 @router.post("/start")
 async def start_simulation():
-    """Start the simulation loop state machine."""
+    """Start simulation and auto-dispatch nearest idle shippers."""
     simulation_engine.phase = "STARTED"
+
+    nearest = simulation_engine.get_nearest_to_warehouse(top_n=3)
+    auto_shipper_ids = [item["shipper_id"] for item in nearest]
+
+    if auto_shipper_ids:
+        await simulation_engine.dispatch_to_warehouse(auto_shipper_ids)
+        await ws_manager.broadcast_clients(
+            {
+                "type": "dispatch_started",
+                "shipper_ids": auto_shipper_ids,
+                "warehouse_lat": WAREHOUSE_LAT,
+                "warehouse_lon": WAREHOUSE_LON,
+                "auto": True,
+            }
+        )
+
     return {
         "status": "started",
         "phase": simulation_engine.phase,
         "shipper_count": len(simulation_engine.shippers),
+        "auto_dispatched_ids": auto_shipper_ids,
         "warehouse": {
             "id": WAREHOUSE_ID,
             "lat": WAREHOUSE_LAT,
@@ -91,7 +114,7 @@ async def dispatch_to_warehouse(req: DispatchRequest):
     if simulation_engine.phase not in ("STARTED", "IDLE"):
         raise HTTPException(400, f"Cannot dispatch in phase: {simulation_engine.phase}")
 
-    simulation_engine.dispatch_to_warehouse(req.shipper_ids)
+    await simulation_engine.dispatch_to_warehouse(req.shipper_ids)
 
     await ws_manager.broadcast_clients(
         {
@@ -128,7 +151,7 @@ async def assign_delivery(req: DeliveryRequest, db: AsyncIOMotorDatabase = Depen
     )
     await order_repo.assign_shipper(order_id, req.shipper_id)
 
-    simulation_engine.set_delivery_target(
+    await simulation_engine.set_delivery_target(
         shipper_id=req.shipper_id,
         dest_lat=req.dest_lat,
         dest_lon=req.dest_lon,
@@ -178,3 +201,116 @@ async def reset_simulation():
     await simulation_engine.sync_all_to_mongo(clear_existing=True)
     await ws_manager.broadcast_clients({"type": "simulation_reset"})
     return {"status": "reset", "shipper_count": len(simulation_engine.shippers)}
+
+
+@router.post("/incident/apply")
+async def apply_incident(req: IncidentRequest):
+    """Apply incident to a shipper."""
+    if req.shipper_id not in simulation_engine.shippers:
+        raise HTTPException(404, f"Shipper {req.shipper_id} not found")
+
+    result = simulation_engine.apply_incident(
+        req.shipper_id,
+        req.incident_type,
+        rain_level=req.rain_level
+    )
+
+    await ws_manager.broadcast_clients({
+        "type": "incident_created",
+        "shipper_id": req.shipper_id,
+        "incident_type": req.incident_type,
+        "result": result,
+    })
+
+    return result
+
+
+@router.post("/incident/resolve/{shipper_id}")
+async def resolve_incident(shipper_id: str):
+    """Resolve incident for a shipper."""
+    if shipper_id not in simulation_engine.shippers:
+        raise HTTPException(404, f"Shipper {shipper_id} not found")
+
+    result = simulation_engine.resolve_incident(shipper_id)
+
+    await ws_manager.broadcast_clients({
+        "type": "incident_resolved",
+        "shipper_id": shipper_id,
+        "result": result,
+    })
+
+    return result
+
+@router.get("/stats/fleet")
+async def get_fleet_stats():
+    """GET /simulation/stats/fleet — Fleet statistics theo TONGQUAN.md."""
+    return simulation_engine.get_fleet_stats()
+
+
+class IncidentApplyRequest(BaseModel):
+    shipper_id: str
+    incident_type: str  # TRAFFIC_JAM | HEAVY_RAIN | CUSTOMER_ABSENT | VEHICLE_BREAKDOWN | LOST_CONNECTION
+    rain_level: Optional[str] = "MEDIUM"  # Fix #6: LIGHT | MEDIUM | HEAVY (for HEAVY_RAIN)
+
+
+@router.post("/incident/apply")
+async def apply_incident(req: IncidentApplyRequest):
+    """Apply an incident to a shipper in-memory and broadcast."""
+    result = simulation_engine.apply_incident(req.shipper_id, req.incident_type, req.rain_level or "MEDIUM")
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+
+    # Broadcast incident_applied
+    ws_payload = {
+        "type": "incident_applied",
+        "shipper_id": req.shipper_id,
+        "incident_type": req.incident_type,
+        "severity": result["severity"],
+        "estimated_delay": result["estimated_delay"],
+        "recommended_action": result["recommended_action"],
+        "location": result["location"],
+    }
+    if "rain_level" in result:
+        ws_payload["rain_level"] = result["rain_level"]
+    await ws_manager.broadcast_clients(ws_payload)
+
+    # Section 23: customer_notification WS event
+    shipper = simulation_engine.shippers.get(req.shipper_id)
+    if shipper and shipper.order_id:
+        reason_map = {
+            "TRAFFIC_JAM": "kẹt xe",
+            "HEAVY_RAIN": "mưa lớn",
+            "CUSTOMER_ABSENT": "khách vắng",
+            "VEHICLE_BREAKDOWN": "hư xe",
+            "LOST_CONNECTION": "mất kết nối",
+        }
+        eta = shipper.calculate_eta() or 0
+        await ws_manager.broadcast_clients({
+            "type": "customer_notification",
+            "order_id": shipper.order_id,
+            "shipper_id": req.shipper_id,
+            "message": f"Đơn hàng của bạn bị delay ~{result['estimated_delay']} phút do {reason_map.get(req.incident_type, req.incident_type)}",
+            "new_eta_minutes": round(eta + result["estimated_delay"], 1),
+            "reason": req.incident_type,
+        })
+
+    # Fix #10: route_updated WS event (for rerouting incidents)
+    if req.incident_type in ("TRAFFIC_JAM", "HEAVY_RAIN"):
+        await ws_manager.broadcast_clients({
+            "type": "route_updated",
+            "shipper_id": req.shipper_id,
+            "reason": req.incident_type,
+            "message": f"Route cập nhật cho {req.shipper_id} do {req.incident_type}",
+        })
+
+    return result
+
+
+@router.post("/incident/resolve/{shipper_id}")
+async def resolve_incident(shipper_id: str):
+    """Resolve an active incident for a shipper."""
+    result = simulation_engine.resolve_incident(shipper_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    await ws_manager.broadcast_clients({"type": "incident_resolved", "shipper_id": shipper_id})
+    return result

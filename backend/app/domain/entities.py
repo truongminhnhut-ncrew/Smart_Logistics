@@ -18,13 +18,25 @@ import uuid
 
 # ── ENUMS ──────────────────────────────────────────────
 class ShipperStatus(str, Enum):
-    """Shipper operational status."""
+    """Shipper operational status — 9 trạng thái theo TONGQUAN.md."""
     IDLE = "IDLE"
     ASSIGNED = "ASSIGNED"
     DELIVERING = "DELIVERING"
+    DELIVERED = "DELIVERED"
     AVAILABLE = "AVAILABLE"
     HEADING_TO_WAREHOUSE = "HEADING_TO_WAREHOUSE"
     AT_WAREHOUSE = "AT_WAREHOUSE"
+    OFFLINE = "OFFLINE"
+    VEHICLE_BREAKDOWN = "VEHICLE_BREAKDOWN"
+    LOST_CONNECTION = "LOST_CONNECTION"
+    DELAYED = "DELAYED"
+
+
+class IncidentSeverity(str, Enum):
+    """Severity levels for incidents."""
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
 
 
 class SignalStatus(str, Enum):
@@ -39,7 +51,9 @@ class OrderStatus(str, Enum):
     PICKED_UP = "PICKED_UP"
     IN_TRANSIT = "IN_TRANSIT"
     DELIVERED = "DELIVERED"
-    FAILED = "FAILED"
+    DELIVERY_FAILED_ATTEMPT_1 = "DELIVERY_FAILED_ATTEMPT_1"  # Lần 1 khách vắng
+    DELIVERY_FAILED_ATTEMPT_2 = "DELIVERY_FAILED_ATTEMPT_2"  # Lần 2 khách vắng
+    FAILED = "FAILED"  # Hoàn toàn không giao được
 
 
 class EventType(str, Enum):
@@ -50,7 +64,13 @@ class EventType(str, Enum):
 
 
 class IncidentType(str, Enum):
-    """Incident / exception types."""
+    """Incident / exception types — 5 loại theo TONGQUAN.md."""
+    TRAFFIC_JAM = "TRAFFIC_JAM"              # 🚗 Kẹt xe
+    HEAVY_RAIN = "HEAVY_RAIN"                # 🌧️ Mưa lớn
+    CUSTOMER_ABSENT = "CUSTOMER_ABSENT"      # 👤 Khách vắng
+    VEHICLE_BREAKDOWN = "VEHICLE_BREAKDOWN"  # 🔧 Hư xe
+    LOST_CONNECTION = "LOST_CONNECTION"      # 🔋 Mất kết nối
+    # Legacy types for backward compatibility
     GPS_LOST = "GPS_LOST"
     SHIPPER_LATE = "SHIPPER_LATE"
     CUSTOMER_NOT_AVAILABLE = "CUSTOMER_NOT_AVAILABLE"
@@ -137,16 +157,20 @@ class Order(BaseModel):
 
 class Incident(BaseModel):
     """
-    Incident / exception event during delivery.
+    Incident / exception event during delivery — 8 fields theo TONGQUAN.md.
 
-    Created manually by dispatcher during simulation.
+    Created manually by dispatcher or auto-detected by system.
     Broadcast immediately to all WebSocket clients.
     """
     incident_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8].upper())
     shipper_id: str = Field(...)
     order_id: Optional[str] = None
     incident_type: IncidentType = Field(...)
+    severity: str = Field(default="MEDIUM")  # LOW | MEDIUM | HIGH
+    location: Optional[dict] = None  # { lat, lon }
     description: str = Field(default="")
+    estimated_delay: int = Field(default=0)  # minutes
+    recommended_action: str = Field(default="")
     status: str = Field(default="ACTIVE")  # ACTIVE | RESOLVED
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resolved_at: Optional[datetime] = None
@@ -209,11 +233,14 @@ class CreateOrderRequest(BaseModel):
 
 
 class CreateIncidentRequest(BaseModel):
-    """Request to create incident."""
+    """Request to create incident — theo TONGQUAN.md mục 19.3."""
     shipper_id: str
     order_id: Optional[str] = None
     incident_type: IncidentType
+    severity: str = "MEDIUM"  # AUTO theo loại sự cố
     description: str = ""
+    estimated_delay: int = 0  # phút, LSTM tự điền
+    recommended_action: str = ""
 
 
 class GPSStreamPayload(BaseModel):

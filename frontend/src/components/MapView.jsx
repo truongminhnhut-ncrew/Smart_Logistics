@@ -14,6 +14,7 @@ export const MapView = ({ shippers = [], selectedId, phase }) => {
   const mapRef = useRef(null)
   const mapInstance = useRef(null)
   const markersRef = useRef(new Map()) // shipper_id -> marker
+  const polylinesRef = useRef(new Map()) // shipper_id -> polyline
   const warehouseMarkerRef = useRef(null)
 
   useEffect(() => {
@@ -102,18 +103,52 @@ export const MapView = ({ shippers = [], selectedId, phase }) => {
         markersRef.current.set(shipper.shipper_id, marker)
       }
 
+      // ── Draw route polyline if available ──
+      if (shipper.route_polyline && shipper.route_polyline.length > 1) {
+        const routeColor = shipper.status === 'DELIVERING' ? '#22c55e' :
+                           shipper.status === 'HEADING_TO_WAREHOUSE' ? '#a855f7' : '#3b82f6'
+        let polyline = polylinesRef.current.get(shipper.shipper_id)
+        if (polyline) {
+          polyline.setLatLngs(shipper.route_polyline)
+          polyline.setStyle({ color: routeColor, opacity: isSelected ? 0.9 : 0.4 })
+        } else {
+          polyline = L.polyline(shipper.route_polyline, {
+            color: routeColor,
+            weight: isSelected ? 4 : 2,
+            opacity: isSelected ? 0.9 : 0.4,
+            dashArray: '8, 6',
+          }).addTo(mapInstance.current)
+          polylinesRef.current.set(shipper.shipper_id, polyline)
+        }
+        // Update weight for selected
+        polyline.setStyle({ weight: isSelected ? 4 : 2 })
+      } else {
+        // Remove polyline if no route
+        const existingPolyline = polylinesRef.current.get(shipper.shipper_id)
+        if (existingPolyline) {
+          existingPolyline.remove()
+          polylinesRef.current.delete(shipper.shipper_id)
+        }
+      }
+
       if (isSelected) {
         // Optionally center map on selected shipper
         // mapInstance.current.panTo([shipper.lat, shipper.lon])
       }
     })
 
-    // Clean up markers for shippers not in list
+    // Clean up markers and polylines for shippers not in list
     const currentIds = new Set(shippers.map(s => s.shipper_id))
     markersRef.current.forEach((marker, id) => {
       if (!currentIds.has(id)) {
         marker.remove()
         markersRef.current.delete(id)
+      }
+    })
+    polylinesRef.current.forEach((polyline, id) => {
+      if (!currentIds.has(id)) {
+        polyline.remove()
+        polylinesRef.current.delete(id)
       }
     })
   }, [shippers, selectedId])

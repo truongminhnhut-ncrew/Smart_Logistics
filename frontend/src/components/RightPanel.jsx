@@ -4,6 +4,21 @@
 
 import { useState, useEffect } from 'react'
 import { incidentsAPI } from '../services/api'
+import IncidentPanel from './IncidentPanel'
+
+// Status color map — 9 trạng thái theo TONGQUAN.md mục 13
+const STATUS_COLORS = {
+  IDLE: '#94a3b8',
+  ASSIGNED: '#60a5fa',
+  HEADING_TO_WAREHOUSE: '#f59e0b',
+  AT_WAREHOUSE: '#a78bfa',
+  DELIVERING: '#22c55e',
+  DELIVERED: '#10b981',
+  DELAYED: '#f97316',
+  VEHICLE_BREAKDOWN: '#ef4444',
+  LOST_CONNECTION: '#6b7280',
+  OFFLINE: '#475569',
+}
 
 export const RightPanel = ({ shipper = null }) => {
   const [activeTab, setActiveTab] = useState('orders')
@@ -45,7 +60,19 @@ export const RightPanel = ({ shipper = null }) => {
   return (
     <div style={styles.container}>
       <h3 style={styles.title}>{shipper.shipper_id}</h3>
-      <div style={styles.statusBadge(shipper.status)}>{shipper.status}</div>
+      <div style={{
+        ...styles.statusBadge(shipper.status),
+        color: STATUS_COLORS[shipper.status] || '#94a3b8',
+        borderColor: STATUS_COLORS[shipper.status] || '#334155',
+      }}>
+        {shipper.has_incident ? `⚠️ ${shipper.status}` : shipper.status}
+      </div>
+
+      {/* IncidentPanel — 5 nút sự cố */}
+      <IncidentPanel
+        selectedShipper={shipper.shipper_id}
+        onIncidentApplied={() => {}}
+      />
 
       <div style={styles.tabs}>
         <button 
@@ -74,9 +101,27 @@ export const RightPanel = ({ shipper = null }) => {
               <div style={styles.value}>{shipper.speed_kmh} km/h</div>
             </div>
             <div style={styles.section}>
-              <div style={styles.label}>Position</div>
-              <div style={styles.value}>{shipper.lat.toFixed(5)}, {shipper.lon.toFixed(5)}</div>
+              <div style={styles.label}>ETA</div>
+              <div style={styles.value}>
+                {shipper.eta_minutes != null ? `${shipper.eta_minutes} phút` : '—'}
+              </div>
             </div>
+            <div style={styles.section}>
+              <div style={styles.label}>Position</div>
+              <div style={styles.value}>{shipper.lat?.toFixed(5)}, {shipper.lon?.toFixed(5)}</div>
+            </div>
+            {shipper.has_incident && (
+              <div style={{
+                background: '#7f1d1d',
+                padding: 8,
+                borderRadius: 6,
+                marginTop: 8,
+                fontSize: 11,
+                color: '#fca5a5',
+              }}>
+                ⚠️ Sự cố: {shipper.incident_type}
+              </div>
+            )}
           </div>
         ) : (
           <div style={styles.tabContent}>
