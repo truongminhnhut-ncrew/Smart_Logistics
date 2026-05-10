@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+import aiohttp
+
 from app.application.services.routing_engine import routing_graph
 from app.db import get_database
 from app.infrastructure.repositories import ShipperRepository, TrackingEventRepository
@@ -47,7 +49,7 @@ INCIDENT_REASSIGN_TIMEOUT = 3600 # 60 minutes → reassign (Fix #4)
 CUSTOMER_ABSENT_MAX_RETRIES = 2  # Max 2 retries (Fix #3)
 
 # ── Graph routing configuration ──
-ROAD_GRAPH_NODE_IDS = list(routing_graph.nodes.keys())
+ROAD_GRAPH_NODE_IDS = []
 
 # ── Rain severity levels (Fix #6) ──
 RAIN_LEVELS = {
@@ -65,6 +67,9 @@ class VirtualShipper:
     speed_kmh: float = 35.0
     heading: float = 0.0
     status: str = "IDLE"
+    base_speed_kmh: float = 35.0
+    roaming_target_lat: Optional[float] = None
+    roaming_target_lon: Optional[float] = None
     target_lat: Optional[float] = None
     target_lon: Optional[float] = None
     order_id: Optional[str] = None
@@ -78,6 +83,7 @@ class VirtualShipper:
     prev_speed_kmh: float = 35.0  # previous tick speed for sudden drop
     has_incident: bool = False
     incident_type: Optional[str] = None
+    incident_previous_status: Optional[str] = None  # restore flow after resolvable incidents
     rain_level: Optional[str] = None      # LIGHT, MEDIUM, HEAVY
     customer_absent_retries: int = 0      # Fix #3: max 2 retries
     # Graph route waypoints: list of (lat, lon) tuples along road graph
@@ -125,11 +131,30 @@ class VirtualShipper:
         self.route_polyline = [[lat, lon] for lat, lon in waypoints]
         logger.info("[Route] %s snapped to graph node and received %d waypoints", self.shipper_id, len(waypoints))
 
+    def _effective_speed_kmh(self) -> float:
+        """Incident-aware movement speed.
+
+        Demo movement is intentionally accelerated 2x so the full 9-step
+        presentation completes quickly while preserving relative incident
+        slowdowns. Traffic jam still drops to ~30% of normal demo speed.
+        """
+        base_speed = (self.base_speed_kmh or self.speed_kmh or 35.0) * 2.0
+        if self.status == "VEHICLE_BREAKDOWN":
+            return 0.0
+        if self.status == "LOST_CONNECTION":
+            return 0.0
+        if self.incident_type == "TRAFFIC_JAM":
+            return max(3.0, base_speed * 0.28)
+        if self.incident_type == "HEAVY_RAIN":
+            rain_factor = RAIN_LEVELS.get((self.rain_level or "MEDIUM").upper(), RAIN_LEVELS["MEDIUM"])["factor"]
+            return max(5.0, base_speed / rain_factor)
+        return base_speed
+
     def move(self, dt: float = 1.0) -> None:
         """Move shipper along graph route waypoints (follows road edges)."""
         # If has route waypoints → follow them along the road
         if self.route_waypoints and self.route_index < len(self.route_waypoints):
-            self.speed_kmh = 40.0
+            self.speed_kmh = self._effective_speed_kmh()
             speed_ms = self.speed_kmh / 3.6
             remaining_dist_m = speed_ms * dt
 
@@ -164,6 +189,10 @@ class VirtualShipper:
             if self.route_index >= len(self.route_waypoints):
                 self.route_waypoints = []
                 self.route_index = 0
+                if self.status == "ROAMING":
+                    self.status = "IDLE"
+                    self.roaming_target_lat = None
+                    self.roaming_target_lon = None
             return
 
         # No road route available: do not use straight-line fallback.
@@ -212,7 +241,10 @@ class VirtualShipper:
             "eta_minutes": self.eta_minutes,
             "has_incident": self.has_incident,
             "incident_type": self.incident_type,
+            "rain_level": self.rain_level,
             "customer_absent_retries": self.customer_absent_retries,
+            "pending_orders": self.pending_orders,
+            "pending_orders_count": len(self.pending_orders),
             "timestamp": timestamp,
             "route_polyline": self.route_polyline if self.route_polyline else None,
         }
@@ -236,12 +268,35 @@ class SimulationEngine:
 
     def _init_shippers(self) -> None:
         """Create virtual shippers on road-graph nodes around HCMC."""
+        global ROAD_GRAPH_NODE_IDS
         self.shippers = {}
-        spawn_node_ids = [node_id for node_id in ROAD_GRAPH_NODE_IDS if node_id != "WH"]
+        
+        if not ROAD_GRAPH_NODE_IDS and routing_graph and hasattr(routing_graph, 'nodes'):
+            try:
+                ROAD_GRAPH_NODE_IDS = list(routing_graph.nodes.keys())
+            except Exception as e:
+                logger.warning("[SimEngine] Failed to extract nodes from routing_graph: %s", e)
+                ROAD_GRAPH_NODE_IDS = []
+        
+        if ROAD_GRAPH_NODE_IDS:
+            spawn_node_ids = [node_id for node_id in ROAD_GRAPH_NODE_IDS if node_id != "WH"]
+        else:
+            spawn_node_ids = []
+        
         for i in range(1, SHIPPER_COUNT + 1):
             shipper_id = f"SHP-{i:03d}"
-            node_id = random.choice(spawn_node_ids)
-            lat, lon = routing_graph.get_node_coordinate(node_id)
+            if spawn_node_ids:
+                try:
+                    node_id = random.choice(spawn_node_ids)
+                    lat, lon = routing_graph.get_node_coordinate(node_id)
+                except Exception as e:
+                    logger.warning("[SimEngine] Failed to get node coordinate: %s, using random location", e)
+                    lat = random.uniform(LAT_MIN, LAT_MAX)
+                    lon = random.uniform(LON_MIN, LON_MAX)
+            else:
+                lat = random.uniform(LAT_MIN, LAT_MAX)
+                lon = random.uniform(LON_MIN, LON_MAX)
+            
             self.shippers[shipper_id] = VirtualShipper(
                 shipper_id=shipper_id,
                 lat=lat,
@@ -256,11 +311,18 @@ class SimulationEngine:
         return [shipper.to_ws_payload() for shipper in self.shippers.values()]
 
     def get_nearest_to_warehouse(self, top_n: int = 3) -> List[dict]:
-        """Return top idle shippers nearest to the warehouse."""
+        """Return top available shippers nearest to the warehouse.
+
+        Available means the shipper is not handling an order/incident. A shipper
+        may be in ROAMING state because the demo gives idle drivers short patrol
+        routes; those shippers must still be eligible. Otherwise `/start` can
+        appear to choose "random" drivers because the actually-nearest roaming
+        markers are excluded.
+        """
         candidates = [
             (shipper.distance_to(WAREHOUSE_LAT, WAREHOUSE_LON), shipper)
             for shipper in self.shippers.values()
-            if shipper.status == "IDLE"
+            if shipper.status in ("IDLE", "ROAMING") and not shipper.has_incident and not shipper.order_id
         ]
         candidates.sort(key=lambda item: item[0])
         return [
@@ -277,19 +339,82 @@ class SimulationEngine:
     async def _fetch_graph_route(
         from_lat: float, from_lon: float, to_lat: float, to_lon: float
     ) -> List[Tuple[float, float]]:
-        """Fetch road-following route from in-memory RoutingGraph/A*."""
-        waypoints = routing_graph.find_route_waypoints(from_lat, from_lon, to_lat, to_lon)
-        if not waypoints:
-            logger.warning(
-                "[GraphRoute] No route found from (%.4f,%.4f) to (%.4f,%.4f)",
-                from_lat,
-                from_lon,
-                to_lat,
-                to_lon,
-            )
+        """Fetch road-following route.
+
+        Prefer real OSRM geometry because it follows OpenStreetMap roads. The
+        internal RoutingGraph is only a coarse offline fallback; using it first
+        makes the dashed line cut through buildings/blocks on the real map.
+        """
+        # First try public OSRM routing service for real road geometry.
+        osrm_url = (
+            f"https://router.project-osrm.org/route/v1/driving/"
+            f"{from_lon},{from_lat};{to_lon},{to_lat}"
+            f"?overview=full&geometries=geojson&steps=false"
+        )
+        logger.info(
+            "[OSRM] Fetching real road route for (%.6f,%.6f) -> (%.6f,%.6f)",
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+        )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(osrm_url, timeout=6) as resp:
+                    if resp.status != 200:
+                        logger.warning("[OSRM] non-200 response: %s", resp.status)
+                        data = None
+                        raise RuntimeError(f"OSRM non-200 response: {resp.status}")
+                    data = await resp.json()
+        except Exception as e:
+            logger.warning("[OSRM] Request failed: %s", e)
+            data = None
+
+        if not data:
+            return SimulationEngine._fetch_internal_graph_route(from_lat, from_lon, to_lat, to_lon)
+
+        routes = data.get("routes") or []
+        if not routes:
+            logger.warning("[OSRM] No routes returned from OSRM.")
+            return SimulationEngine._fetch_internal_graph_route(from_lat, from_lon, to_lat, to_lon)
+
+        geom = routes[0].get("geometry", {})
+        coords = geom.get("coordinates") if isinstance(geom, dict) else None
+        if not coords:
+            logger.warning("[OSRM] No geometry coordinates found in OSRM response.")
+            return SimulationEngine._fetch_internal_graph_route(from_lat, from_lon, to_lat, to_lon)
+
+        # coords are [ [lon, lat], ... ] -> convert to [(lat, lon), ...]
+        waypoints = [(float(lat), float(lon)) for lon, lat in coords]
+
+        # Downsample if too many points to keep payloads small (e.g., > 300)
+        max_points = 300
+        if len(waypoints) > max_points:
+            step = max(1, len(waypoints) // max_points)
+            waypoints = waypoints[::step]
+
+        logger.info("[OSRM] Real road route obtained with %d waypoints (downsampled to %d)", len(coords), len(waypoints))
+        return waypoints
+
+    @staticmethod
+    def _fetch_internal_graph_route(
+        from_lat: float, from_lon: float, to_lat: float, to_lon: float
+    ) -> List[Tuple[float, float]]:
+        """Offline fallback route from the coarse internal graph.
+
+        This is intentionally fallback-only because it does not match real
+        OpenStreetMap streets closely enough for visual map demos.
+        """
+        try:
+            if routing_graph is None:
+                return []
+            waypoints = routing_graph.find_route_waypoints(from_lat, from_lon, to_lat, to_lon)
+        except Exception as exc:
+            logger.info("[GraphRoute] routing_graph.find_route_waypoints raised: %s", exc)
             return []
 
-        logger.info("[GraphRoute] Route fetched: %d waypoints", len(waypoints))
+        logger.info("[GraphRoute] Fallback internal route fetched: %d waypoints", len(waypoints))
         return waypoints
 
     def find_nearby_orders(self, shipper_id: str, exclude_order_id: str = None, radius_km: float = 3.0) -> List[dict]:
@@ -334,6 +459,27 @@ class SimulationEngine:
         nearby.sort(key=lambda x: x["distance_km"])
         return nearby
 
+    async def _assign_roaming_route(self, shipper: VirtualShipper) -> None:
+        """Give an idle shipper a short OSRM road-following route so the city stays alive."""
+        if shipper.status != "IDLE" or shipper.has_incident:
+            return
+
+        # Pick a nearby target inside HCMC bounds; OSRM route keeps movement on roads.
+        for _ in range(8):
+            target_lat = min(max(shipper.lat + random.uniform(-0.018, 0.018), LAT_MIN), LAT_MAX)
+            target_lon = min(max(shipper.lon + random.uniform(-0.018, 0.018), LON_MIN), LON_MAX)
+            if shipper.distance_to(target_lat, target_lon) >= 0.4:
+                waypoints = await self._fetch_graph_route(shipper.lat, shipper.lon, target_lat, target_lon)
+                if waypoints:
+                    shipper.status = "ROAMING"
+                    shipper.target_lat = None
+                    shipper.target_lon = None
+                    shipper.roaming_target_lat = target_lat
+                    shipper.roaming_target_lon = target_lon
+                    shipper.base_speed_kmh = random.uniform(22, 34)
+                    shipper.set_route(waypoints)
+                    return
+
     async def dispatch_to_warehouse(self, shipper_ids: List[str]) -> None:
         """Command shippers to head to the warehouse with graph road routes."""
         self.dispatched_ids = shipper_ids
@@ -343,7 +489,16 @@ class SimulationEngine:
         for shipper_id in shipper_ids:
             shipper = self.shippers.get(shipper_id)
             if shipper:
+                # Dispatch must be allowed to interrupt IDLE/ROAMING patrol so
+                # the selected top-3 nearest shippers are exactly the ones sent
+                # to the warehouse.
                 shipper.status = "HEADING_TO_WAREHOUSE"
+                shipper.base_speed_kmh = random.uniform(34, 46)
+                shipper.roaming_target_lat = None
+                shipper.roaming_target_lon = None
+                shipper.has_incident = False
+                shipper.incident_type = None
+                shipper.rain_level = None
                 shipper.target_lat = WAREHOUSE_LAT
                 shipper.target_lon = WAREHOUSE_LON
                 waypoints = await self._fetch_graph_route(
@@ -359,6 +514,11 @@ class SimulationEngine:
         shipper = self.shippers.get(shipper_id)
         if shipper:
             shipper.status = "DELIVERING"
+            shipper.base_speed_kmh = random.uniform(32, 44)
+            shipper.customer_absent_retries = 0
+            shipper.has_incident = False
+            shipper.incident_type = None
+            shipper.rain_level = None
             shipper.target_lat = dest_lat
             shipper.target_lon = dest_lon
             shipper.order_id = order_id
@@ -366,13 +526,17 @@ class SimulationEngine:
                 "dest_lat": dest_lat,
                 "dest_lon": dest_lon,
             }
-            # Track order in memory
+            # Track order in memory while preserving demo metadata
+            # (customer_name/address/total_amount) so the frontend detail panel
+            # can show complete order information after auto assignment.
+            existing_order = self._orders.get(order_id, {})
             self._orders[order_id] = {
+                **existing_order,
                 "shipper_id": shipper_id,
                 "dest_lat": dest_lat,
                 "dest_lon": dest_lon,
                 "status": "IN_TRANSIT",
-                "attempt": 1,  # Lần thứ 1 giao
+                "attempt": existing_order.get("attempt", 0) + 1,
             }
             self.phase = "DELIVERING"
             # Fetch graph route for road-following
@@ -382,6 +546,54 @@ class SimulationEngine:
             if waypoints:
                 shipper.set_route(waypoints)
 
+    async def _send_replacement_to_warehouse(self, replacement_id: str, broken_id: str) -> None:
+        """Send an idle replacement shipper to warehouse without resetting the whole dispatch wave."""
+        replacement = self.shippers.get(replacement_id)
+        if not replacement:
+            return
+
+        if broken_id in self.dispatched_ids:
+            self.dispatched_ids = [replacement_id if sid == broken_id else sid for sid in self.dispatched_ids]
+        elif replacement_id not in self.dispatched_ids:
+            self.dispatched_ids.append(replacement_id)
+
+        self._arrived_at_warehouse = [sid for sid in self._arrived_at_warehouse if sid != broken_id]
+        self.phase = "DISPATCHING"
+        replacement.status = "HEADING_TO_WAREHOUSE"
+        replacement.base_speed_kmh = random.uniform(34, 46)
+        replacement.has_incident = False
+        replacement.incident_type = None
+        replacement.rain_level = None
+        replacement.order_id = None
+        replacement.roaming_target_lat = None
+        replacement.roaming_target_lon = None
+        replacement.target_lat = WAREHOUSE_LAT
+        replacement.target_lon = WAREHOUSE_LON
+
+        waypoints = await self._fetch_graph_route(
+            replacement.lat, replacement.lon, WAREHOUSE_LAT, WAREHOUSE_LON
+        )
+        if waypoints:
+            replacement.set_route(waypoints)
+
+        if self.ws_manager:
+            await self.ws_manager.broadcast_clients({
+                "type": "warehouse_replacement_assigned",
+                "broken_shipper_id": broken_id,
+                "replacement_shipper_id": replacement_id,
+                "warehouse_id": WAREHOUSE_ID,
+            })
+
+    def _nearest_idle_shipper(self, lat: float, lon: float, exclude_id: str) -> Optional[VirtualShipper]:
+        """Find nearest available shipper that can replace an incident shipper."""
+        candidates = [
+            (s.distance_to(lat, lon), s)
+            for s in self.shippers.values()
+            if s.status == "IDLE" and not s.has_incident and s.shipper_id != exclude_id
+        ]
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1] if candidates else None
+
     def apply_incident(self, shipper_id: str, incident_type: str, rain_level: str = "MEDIUM") -> dict:
         """Apply an incident to a shipper — theo TONGQUAN.md mục 19.4."""
         shipper = self.shippers.get(shipper_id)
@@ -389,24 +601,81 @@ class SimulationEngine:
             return {"error": "Shipper not found"}
 
         defaults = INCIDENT_DEFAULTS.get(incident_type, {"severity": "MEDIUM", "estimated_delay": 15, "action": "Đang xử lý..."})
+
+        # Preserve the business flow before temporary incidents mutate status.
+        # Example: TRAFFIC_JAM changes DELIVERING/HEADING_TO_WAREHOUSE -> DELAYED,
+        # but resolving it must continue the same route instead of dropping to IDLE.
+        if not shipper.has_incident:
+            shipper.incident_previous_status = shipper.status
+
         shipper.has_incident = True
         shipper.incident_type = incident_type
         shipper.incident_ticks = 0
 
         if incident_type == "VEHICLE_BREAKDOWN":
+            previous_status = shipper.incident_previous_status or shipper.status
             shipper.status = "VEHICLE_BREAKDOWN"
             shipper.speed_kmh = 0
+
+            # If a shipper breaks while delivering, immediately assign the order
+            # to the nearest idle shipper and clear the broken shipper route.
+            if shipper.order_id:
+                order_id = shipper.order_id
+                order_info = self._orders.get(order_id)
+                takeover_shipper = self._nearest_idle_shipper(shipper.lat, shipper.lon, shipper_id)
+                if order_info and takeover_shipper:
+                    logger.info("[Takeover] %s taking over %s from %s", takeover_shipper.shipper_id, order_id, shipper_id)
+                    order_info["shipper_id"] = takeover_shipper.shipper_id
+                    order_info["status"] = "IN_TRANSIT"
+
+                    asyncio.create_task(self.set_delivery_target(
+                        takeover_shipper.shipper_id,
+                        order_info["dest_lat"],
+                        order_info["dest_lon"],
+                        order_id
+                    ))
+
+                    shipper.order_id = None
+                    shipper.target_lat = None
+                    shipper.target_lon = None
+                    shipper.route_waypoints = []
+                    shipper.route_index = 0
+                    shipper.route_polyline = []
+
+                    defaults["action"] = f"Hư xe khi đang giao hàng. Đã điều {takeover_shipper.shipper_id} giao thay đơn {order_id}"
+                else:
+                    defaults["action"] = "Hư xe khi đang giao hàng. Không tìm thấy shipper idle để giao thay, đơn đang chờ..."
+            elif previous_status == "HEADING_TO_WAREHOUSE":
+                replacement_shipper = self._nearest_idle_shipper(shipper.lat, shipper.lon, shipper_id)
+                if replacement_shipper:
+                    logger.info(
+                        "[WarehouseReplacement] %s replacing %s to warehouse",
+                        replacement_shipper.shipper_id,
+                        shipper_id,
+                    )
+                    asyncio.create_task(self._send_replacement_to_warehouse(replacement_shipper.shipper_id, shipper_id))
+
+                    shipper.target_lat = None
+                    shipper.target_lon = None
+                    shipper.route_waypoints = []
+                    shipper.route_index = 0
+                    shipper.route_polyline = []
+
+                    defaults["action"] = f"Hư xe khi đang về kho. Đã điều {replacement_shipper.shipper_id} thay thế về warehouse"
+                else:
+                    defaults["action"] = "Hư xe khi đang về kho. Không tìm thấy shipper idle để thay thế, đang chờ..."
         elif incident_type == "LOST_CONNECTION":
             shipper.status = "LOST_CONNECTION"
+            shipper.speed_kmh = 0
         elif incident_type == "TRAFFIC_JAM":
             shipper.status = "DELAYED"
-            shipper.speed_kmh = max(3, shipper.speed_kmh * 0.3)
+            shipper.speed_kmh = max(3, shipper.base_speed_kmh * 0.28)
         elif incident_type == "HEAVY_RAIN":
             # Fix #6: Rain 3 levels
             rain_cfg = RAIN_LEVELS.get(rain_level.upper(), RAIN_LEVELS["MEDIUM"])
             shipper.rain_level = rain_level.upper()
             shipper.status = "DELAYED"
-            shipper.speed_kmh = max(2, shipper.speed_kmh / rain_cfg["factor"])
+            shipper.speed_kmh = max(5, shipper.base_speed_kmh / rain_cfg["factor"])
             defaults = {**defaults, "severity": rain_cfg["severity"], "action": rain_cfg["action"]}
         elif incident_type == "CUSTOMER_ABSENT":
             # Fix #3: Khách vắng - Max 2 retries theo TONGQUAN.md mục 19.4
@@ -495,12 +764,31 @@ class SimulationEngine:
         shipper.rain_level = None
         shipper.slow_ticks = 0
         shipper.stop_ticks = 0
-        if shipper.order_id:
-            shipper.status = "DELIVERING"
-            shipper.speed_kmh = 35.0
+        previous_status = shipper.incident_previous_status
+        shipper.incident_previous_status = None
+
+        if shipper.order_id and shipper.target_lat is not None and shipper.target_lon is not None:
+            shipper.status = previous_status if previous_status in ("DELIVERING", "DELAYED") else "DELIVERING"
+            if shipper.status == "DELAYED":
+                shipper.status = "DELIVERING"
+            shipper.speed_kmh = shipper.base_speed_kmh
+        elif (
+            previous_status == "HEADING_TO_WAREHOUSE"
+            and shipper.target_lat is not None
+            and shipper.target_lon is not None
+        ):
+            shipper.status = "HEADING_TO_WAREHOUSE"
+            shipper.speed_kmh = shipper.base_speed_kmh
+        elif previous_status == "AT_WAREHOUSE":
+            shipper.status = "AT_WAREHOUSE"
+            shipper.speed_kmh = 0.0
+        elif previous_status == "ROAMING" and shipper.route_waypoints:
+            shipper.status = "ROAMING"
+            shipper.speed_kmh = shipper.base_speed_kmh
         else:
             shipper.status = "IDLE"
-            shipper.speed_kmh = 30.0
+            shipper.speed_kmh = 0.0
+
         return {"shipper_id": shipper_id, "status": shipper.status, "resolved": True}
 
     def get_fleet_stats(self) -> dict:
@@ -680,6 +968,9 @@ class SimulationEngine:
         tracking_repo = TrackingEventRepository(db) if db is not None else None
 
         for shipper_id, shipper in self.shippers.items():
+            if shipper.status == "IDLE" and not shipper.has_incident and self._tick % 12 == 0 and random.random() < 0.18:
+                await self._assign_roaming_route(shipper)
+
             # Track old ETA for eta_updated event
             old_eta = shipper.calculate_eta()
             shipper.move(GPS_INTERVAL)
@@ -692,8 +983,10 @@ class SimulationEngine:
 
             if shipper.status == "HEADING_TO_WAREHOUSE" and shipper.has_arrived():
                 shipper.status = "AT_WAREHOUSE"
+                shipper.speed_kmh = 0.0
                 shipper.target_lat = None
                 shipper.target_lon = None
+                shipper.route_polyline = []
                 if shipper_id not in self._arrived_at_warehouse:
                     self._arrived_at_warehouse.append(shipper_id)
                     if self.ws_manager:
@@ -706,8 +999,108 @@ class SimulationEngine:
                                 "arrived_so_far": self._arrived_at_warehouse,
                             }
                         )
+                    # Auto-load enough demo orders before assigning. The demo requires every
+                    # dispatched shipper to receive 1-3 orders immediately when arriving at
+                    # the warehouse, so keep a larger local queue than the original 5 orders.
+                    required_demo_orders = max(12, len(self.dispatched_ids) * 3)
+                    if not self._orders:
+                        demo_customers = [
+                            ("Nguyễn Minh Anh", "Landmark 81, Bình Thạnh", 10.7952, 106.7218, 189000),
+                            ("Trần Quốc Bảo", "Pearl Plaza, Bình Thạnh", 10.8010, 106.7185, 245000),
+                            ("Lê Hoàng Nam", "ĐH Hutech, Điện Biên Phủ", 10.8017, 106.7147, 132000),
+                            ("Phạm Thu Hà", "Chợ Bà Chiểu, Bình Thạnh", 10.8034, 106.6966, 318000),
+                            ("Võ Gia Hân", "Saigon Pearl, Nguyễn Hữu Cảnh", 10.7893, 106.7199, 99000),
+                            ("Đặng Hải Long", "Vinhomes Central Park", 10.7947, 106.7206, 415000),
+                            ("Bùi Khánh Linh", "Ung Văn Khiêm, Bình Thạnh", 10.8105, 106.7138, 267000),
+                            ("Hoàng Tuấn Kiệt", "Xô Viết Nghệ Tĩnh, Bình Thạnh", 10.8120, 106.7042, 154000),
+                            ("Ngô Phương Mai", "Phan Văn Hân, Bình Thạnh", 10.7940, 106.7062, 286000),
+                            ("Đỗ Nhật Minh", "Nguyễn Xí, Bình Thạnh", 10.8173, 106.7056, 203000),
+                            ("Mai Thanh Tâm", "D2, Bình Thạnh", 10.8045, 106.7175, 176000),
+                            ("Cao Bảo Ngọc", "Thanh Đa, Bình Quới", 10.8245, 106.7335, 351000),
+                        ]
+                        for i in range(required_demo_orders):
+                            name, address, lat, lon, total = demo_customers[i % len(demo_customers)]
+                            order_id = f"ORD-{i + 1:03d}"
+                            self._orders[order_id] = {
+                                "shipper_id": None,
+                                "dest_lat": lat + random.uniform(-0.0025, 0.0025),
+                                "dest_lon": lon + random.uniform(-0.0025, 0.0025),
+                                "status": "PENDING",
+                                "attempt": 0,
+                                "customer_name": name,
+                                "address": address,
+                                "total_amount": total,
+                            }
+
+                    # Mỗi shipper khi tới kho sẽ được random 1-3 đơn ngay lập tức.
+                    # Đơn đầu tiên giao ngay, các đơn còn lại vào queue pending_orders để
+                    # detail panel thấy đủ danh sách đơn mà không cần thao tác thủ công.
+                    shipper_for_assignment = shipper
+                    if not shipper_for_assignment.order_id and not shipper_for_assignment.pending_orders:
+                        shipper_for_assignment.pending_orders = []
+                        orders_to_assign = random.randint(1, 3)
+                        assigned_order_ids = []
+
+                        for idx in range(orders_to_assign):
+                            pending = next(
+                                (oid for oid, info in self._orders.items() if info["status"] == "PENDING"),
+                                None,
+                            )
+                            if not pending:
+                                break
+
+                            order_info = self._orders[pending]
+                            order_info["shipper_id"] = shipper_id
+                            assigned_order_ids.append(pending)
+
+                            if idx == 0:
+                                # Đơn đầu tiên: bắt đầu giao ngay sau khi UI nhận sự kiện assigned.
+                                order_info["status"] = "IN_TRANSIT"
+                                await self.set_delivery_target(
+                                    shipper_id,
+                                    order_info["dest_lat"],
+                                    order_info["dest_lon"],
+                                    pending,
+                                )
+                            else:
+                                # Đơn tiếp theo: xếp hàng chờ của shipper.
+                                order_info["status"] = "ASSIGNED"
+                                shipper_for_assignment.pending_orders.append(
+                                    {
+                                        "order_id": pending,
+                                        "dest_lat": order_info["dest_lat"],
+                                        "dest_lon": order_info["dest_lon"],
+                                        "attempt": 0,
+                                    }
+                                )
+
+                            if self.ws_manager:
+                                await self.ws_manager.broadcast_clients(
+                                    {
+                                        "type": "delivery_assigned",
+                                        "shipper_id": shipper_id,
+                                        "order_id": pending,
+                                        "order_ids": assigned_order_ids,
+                                        "dest_lat": order_info["dest_lat"],
+                                        "dest_lon": order_info["dest_lon"],
+                                        "customer_name": order_info.get("customer_name"),
+                                        "address": order_info.get("address"),
+                                        "total_amount": order_info.get("total_amount"),
+                                    }
+                                )
+
+                        if assigned_order_ids and self.ws_manager:
+                            await self.ws_manager.broadcast_clients(
+                                {
+                                    "type": "warehouse_orders_loaded",
+                                    "shipper_id": shipper_id,
+                                    "order_ids": assigned_order_ids,
+                                    "orders_count": len(assigned_order_ids),
+                                }
+                            )
+
                     if set(self._arrived_at_warehouse) >= set(self.dispatched_ids):
-                        self.phase = "WAITING_FOR_ORDER"
+                        self.phase = "DELIVERING"
                         if self.ws_manager:
                             await self.ws_manager.broadcast_clients(
                                 {
@@ -723,13 +1116,32 @@ class SimulationEngine:
                     [delivery.get("dest_lat", WAREHOUSE_LAT), delivery.get("dest_lon", WAREHOUSE_LON)],
                 ) * 111
 
-                shipper.status = "DELIVERED"
+                completed_order_id = shipper.order_id
+                if completed_order_id and completed_order_id in self._orders:
+                    self._orders[completed_order_id]["status"] = "DELIVERED"
+
                 shipper.target_lat = None
                 shipper.target_lon = None
                 if shipper_repo:
                     await shipper_repo.increment_completed_orders(shipper_id, round(distance_km, 2))
-                completed_order_id = shipper.order_id
-                shipper.order_id = None
+
+                # Nếu còn đơn chờ thì giao tiếp, không về DELIVERED ngay
+                if shipper.pending_orders:
+                    next_order = shipper.pending_orders.pop(0)
+                    next_order_id = next_order["order_id"]
+                    if next_order_id in self._orders:
+                        self._orders[next_order_id]["status"] = "IN_TRANSIT"
+                        self._orders[next_order_id]["shipper_id"] = shipper_id
+
+                    await self.set_delivery_target(
+                        shipper_id,
+                        next_order["dest_lat"],
+                        next_order["dest_lon"],
+                        next_order_id,
+                    )
+                else:
+                    shipper.status = "DELIVERED"
+                    shipper.order_id = None
 
                 if self.ws_manager:
                     await self.ws_manager.broadcast_clients(
@@ -742,6 +1154,8 @@ class SimulationEngine:
 
                 delivering_done = all(
                     self.shippers[dispatched_id].status in ("DELIVERED", "AT_WAREHOUSE")
+                    and not self.shippers[dispatched_id].order_id
+                    and not self.shippers[dispatched_id].pending_orders
                     for dispatched_id in self.dispatched_ids
                     if dispatched_id in self.shippers
                 )

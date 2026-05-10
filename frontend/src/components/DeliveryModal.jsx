@@ -7,9 +7,10 @@ import { simulationAPI } from '../services/api'
 
 export const DeliveryModal = ({ shipperIds = [], onClose }) => {
   const [selectedShipper, setSelectedShipper] = useState(shipperIds[0] || '')
-  const [destLat, setDestLat] = useState('10.776')
-  const [destLon, setDestLon] = useState('106.700')
-  const [destText, setDestText] = useState('Hồ Chí Minh City')
+  const [destLat, setDestLat] = useState('10.8214')
+  const [destLon, setDestLon] = useState('106.6843')
+  const [destText, setDestText] = useState('Gò Vấp, Hồ Chí Minh City')
+  const [itemsCount, setItemsCount] = useState('1')
   const [loading, setLoading] = useState(false)
 
   const handleSubmit = async (e) => {
@@ -20,7 +21,8 @@ export const DeliveryModal = ({ shipperIds = [], onClose }) => {
         shipper_id: selectedShipper,
         dest_lat: parseFloat(destLat),
         dest_lon: parseFloat(destLon),
-        destination_text: destText
+        destination_text: destText,
+        items_count: parseInt(itemsCount) || 1
       })
       onClose()
     } catch (err) {
@@ -58,6 +60,19 @@ export const DeliveryModal = ({ shipperIds = [], onClose }) => {
               onChange={(e) => setDestText(e.target.value)}
               style={styles.input}
               placeholder="Ví dụ: 123 Lê Lợi, Quận 1"
+              required
+            />
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Số lượng kiện hàng</label>
+            <input 
+              type="number" 
+              min="1"
+              max="50"
+              value={itemsCount} 
+              onChange={(e) => setItemsCount(e.target.value)}
+              style={styles.input}
               required
             />
           </div>

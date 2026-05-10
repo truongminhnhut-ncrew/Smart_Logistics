@@ -45,6 +45,9 @@ export const simulationAPI = {
   assignDelivery: (data) => api.post('/simulation/assign-delivery', data),
   complete: () => api.post('/simulation/complete'),
   reset: () => api.post('/simulation/reset'),
+  applyIncident: (data) => api.post('/simulation/incident/apply', data),
+  resolveIncident: (shipperId) => api.post(`/simulation/incident/resolve/${shipperId}`),
+  getOrdersSnapshot: () => api.get('/simulation/orders'),
 }
 
 // Incidents API

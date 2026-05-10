@@ -23,6 +23,8 @@ from app.presentation.api.routers import shippers, orders, dashboard
 from app.presentation.api.routers.simulation import router as simulation_router
 from app.presentation.api.routers.incidents import router as incidents_router
 from app.application.services.simulation_engine import simulation_engine
+from app.application.services import GPSService
+from app.domain import GPSStreamPayload
 
 logging.basicConfig(
     level=logging.INFO,
@@ -126,6 +128,33 @@ async def websocket_client(websocket: WebSocket):
         logger.debug(f"[WS] Client disconnected: {e}")
     finally:
         await ws_manager.disconnect_client(websocket)
+
+
+# ── WEBSOCKET — SIMULATOR GPS INGEST ──────────────────────
+@app.websocket("/ws/ingest")
+async def websocket_ingest(websocket: WebSocket):
+    """WebSocket endpoint for simulator GPS stream ingestion."""
+    await websocket.accept()
+    db = get_database()
+
+    if db is None:
+        await websocket.close(code=1011, reason="Database unavailable")
+        return
+
+    gps_service = GPSService(db)
+    logger.info("[WS/Ingest] Simulator connected")
+    try:
+        while True:
+            data = await websocket.receive_json()
+            payload = GPSStreamPayload(**data)
+            await gps_service.process_gps_stream(payload)
+    except Exception as e:
+        logger.debug(f"[WS/Ingest] Disconnected: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
 # ── ROOT ──────────────────────────────────────────────────

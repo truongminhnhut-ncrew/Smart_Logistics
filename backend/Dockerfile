@@ -19,8 +19,9 @@ COPY . .
 EXPOSE 8000
 
 # Health check
+# Use Python stdlib instead of requests because requests is not a required runtime dependency.
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()" || exit 1
 
 # Run FastAPI
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

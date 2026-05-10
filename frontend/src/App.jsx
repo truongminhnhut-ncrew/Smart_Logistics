@@ -10,8 +10,8 @@ import { RightPanel } from './components/RightPanel'
 import { Dashboard } from './components/Dashboard'
 import { SimulationControls } from './components/SimulationControls'
 import { DeliveryModal } from './components/DeliveryModal'
-import { IncidentModal } from './components/IncidentModal'
 import { NotificationToast } from './components/NotificationToast'
+import { AutoDemoPanel } from './components/AutoDemoPanel'
 
 import { useWebSocket } from './hooks/useWebSocket'
 import { useShippers } from './hooks/useShippers'
@@ -22,9 +22,17 @@ function App() {
   const [showDashboard, setShowDashboard] = useState(false)
   const [stats, setStats] = useState(null)
   const [activeIncident, setActiveIncident] = useState(null)
+  const [systemAlert, setSystemAlert] = useState(null)
+  const [customerNotice, setCustomerNotice] = useState(null)
+  const [etaUpdate, setEtaUpdate] = useState(null)
   const [showDeliveryModal, setShowDeliveryModal] = useState(false)
-  const [showIncidentModal, setShowIncidentModal] = useState(false)
   const [nearestShippers, setNearestShippers] = useState([])
+  const [deliveryModalShipperIds, setDeliveryModalShipperIds] = useState([])
+  const [demoScript, setDemoScript] = useState({
+    step: 'Bước 0/9',
+    text: 'Trạng thái ban đầu: tất cả shipper đứng yên trên bản đồ, ⏸️ Chờ lệnh.',
+  })
+  const [demoMapIncidents, setDemoMapIncidents] = useState({})
 
   const ws = useWebSocket()
   const { 
@@ -34,6 +42,7 @@ function App() {
     selectedShipper,
     simulationPhase,
     dispatchedIds,
+    arrivedAtWarehouse,
     handleInitialState,
     handleBulkUpdate,
     handleDispatch,
@@ -73,7 +82,13 @@ function App() {
       ws.on('shipper_arrived', handleShipperArrived),
       ws.on('all_arrived_at_warehouse', (data) => {
         handleAllArrived()
-        setShowDeliveryModal(true)
+        const fromEvent = data?.arrived_so_far || data?.shipper_ids || []
+        const atWarehouseNow = shipperList
+          .filter((s) => String(s?.status || '').toUpperCase() === 'AT_WAREHOUSE')
+          .map((s) => s.shipper_id)
+        const modalIds = [...new Set([...(fromEvent || []), ...dispatchedIds, ...atWarehouseNow].filter(Boolean))]
+        setDeliveryModalShipperIds(modalIds)
+        setShowDeliveryModal(modalIds.length > 0)
       }),
       ws.on('delivery_assigned', handleDeliveryAssigned),
       ws.on('delivery_completed', handleDeliveryCompleted),
@@ -81,11 +96,90 @@ function App() {
       ws.on('simulation_reset', handleReset),
       ws.on('incident_created', (data) => {
         setActiveIncident(data)
+      }),
+      ws.on('incident_applied', (data) => {
+        setActiveIncident(data)
+        setDemoMapIncidents((prev) => ({
+          ...prev,
+          [data.shipper_id]: {
+            ...(prev[data.shipper_id] || {}),
+            [data.incident_type]: {
+              type: data.incident_type,
+              estimatedDelay: data.estimated_delay,
+              location: data.location,
+              startedAt: Date.now(),
+              active: true,
+            },
+          },
+        }))
+      }),
+      ws.on('incident_resolved', (data) => {
+        setDemoMapIncidents((prev) => {
+          const next = { ...prev }
+          if (next[data.shipper_id]) delete next[data.shipper_id]
+          return next
+        })
+      }),
+      ws.on('system_alert', (data) => {
+        setSystemAlert(data)
+      }),
+      ws.on('customer_notification', (data) => {
+        setCustomerNotice(data)
+      }),
+      ws.on('eta_updated', (data) => {
+        setEtaUpdate(data)
       })
     ]
 
     return () => unsubs.forEach(unsub => unsub())
-  }, [ws, handleInitialState, handleBulkUpdate, handleDispatch, handleShipperArrived, handleAllArrived, handleDeliveryAssigned, handleDeliveryCompleted, handleSimulationCompleted, handleReset])
+  }, [ws, handleInitialState, handleBulkUpdate, handleDispatch, handleShipperArrived, handleAllArrived, handleDeliveryAssigned, handleDeliveryCompleted, handleSimulationCompleted, handleReset, dispatchedIds, shipperList])
+
+  useEffect(() => {
+    if (showDeliveryModal) return
+
+    const atWarehouseIds = shipperList
+      .filter((s) => String(s?.status || '').toUpperCase() === 'AT_WAREHOUSE')
+      .map((s) => s.shipper_id)
+      .filter(Boolean)
+
+    if ((simulationPhase === 'WAITING_FOR_ORDER' || atWarehouseIds.length > 0) && atWarehouseIds.length > 0) {
+      setDeliveryModalShipperIds(atWarehouseIds)
+      setShowDeliveryModal(true)
+    }
+  }, [simulationPhase, shipperList, showDeliveryModal])
+
+  useEffect(() => {
+    const handleCloseModal = () => setShowDeliveryModal(false)
+    const handleDemoScript = (event) => setDemoScript(event.detail)
+    const handleDemoIncident = (event) => {
+      const { shipperId, incidentType, active = true, meta = {} } = event.detail || {}
+      if (!shipperId || !incidentType) return
+      setDemoMapIncidents((prev) => {
+        const next = { ...prev }
+        if (!active) {
+          if (next[shipperId]) {
+            delete next[shipperId][incidentType]
+            if (Object.keys(next[shipperId]).length === 0) delete next[shipperId]
+          }
+          return next
+        }
+        next[shipperId] = {
+          ...(next[shipperId] || {}),
+          [incidentType]: { type: incidentType, active, startedAt: Date.now(), ...meta },
+        }
+        return next
+      })
+    }
+
+    window.addEventListener('close_delivery_modal', handleCloseModal)
+    window.addEventListener('demo_script_update', handleDemoScript)
+    window.addEventListener('demo_incident_visual', handleDemoIncident)
+    return () => {
+      window.removeEventListener('close_delivery_modal', handleCloseModal)
+      window.removeEventListener('demo_script_update', handleDemoScript)
+      window.removeEventListener('demo_incident_visual', handleDemoIncident)
+    }
+  }, [])
 
   // Load dashboard stats
   useEffect(() => {
@@ -122,6 +216,14 @@ function App() {
         onDispatch={handleDispatchAction}
       />
 
+      <AutoDemoPanel
+        shippers={shipperList}
+        onNearestFetched={setNearestShippers}
+        onDispatch={handleDispatchAction}
+        onSelectShipper={setSelectedShipperId}
+        onShowStats={setShowDashboard}
+      />
+
       {nearestShippers.length > 0 && (
         <div style={styles.nearestPanel}>
           <span>Found {nearestShippers.length} nearest shippers:</span>
@@ -153,6 +255,8 @@ function App() {
             shippers={shipperList} 
             selectedId={selectedShipperId} 
             phase={simulationPhase}
+            demoScript={demoScript}
+            demoMapIncidents={demoMapIncidents}
           />
         </div>
 
@@ -180,32 +284,59 @@ function App() {
             )}
           </div>
           
-          <button 
-            style={styles.incidentBtn}
-            onClick={() => setShowIncidentModal(true)}
-          >
-            ⚠️ Report Incident
-          </button>
         </div>
       </div>
 
       {showDeliveryModal && (
         <DeliveryModal 
-          shipperIds={dispatchedIds} 
+          shipperIds={deliveryModalShipperIds.length > 0 ? deliveryModalShipperIds : dispatchedIds}
           onClose={() => setShowDeliveryModal(false)} 
         />
       )}
 
-      {showIncidentModal && (
-        <IncidentModal 
-          shippers={shipperList.filter(s => s.status === 'DELIVERING')} 
-          onClose={() => setShowIncidentModal(false)} 
-        />
-      )}
 
       <NotificationToast 
         incident={activeIncident} 
         onClear={() => setActiveIncident(null)} 
+      />
+
+      <NotificationToast
+        incident={
+          systemAlert
+            ? {
+                shipper_id: systemAlert.shipper_id,
+                incident_type: `SYSTEM_ALERT: ${systemAlert.suspected_incident}`,
+                description: systemAlert.message,
+              }
+            : null
+        }
+        onClear={() => setSystemAlert(null)}
+      />
+
+      <NotificationToast
+        incident={
+          customerNotice
+            ? {
+                shipper_id: customerNotice.shipper_id,
+                incident_type: `CUSTOMER_NOTICE (Order ${customerNotice.order_id})`,
+                description: `${customerNotice.message} | ETA mới: ${customerNotice.new_eta_minutes} phút`,
+              }
+            : null
+        }
+        onClear={() => setCustomerNotice(null)}
+      />
+
+      <NotificationToast
+        incident={
+          etaUpdate
+            ? {
+                shipper_id: etaUpdate.shipper_id,
+                incident_type: 'ETA_UPDATED',
+                description: `ETA: ${etaUpdate.old_eta_minutes} → ${etaUpdate.new_eta_minutes} phút (Δ ${etaUpdate.delta_minutes})`,
+              }
+            : null
+        }
+        onClear={() => setEtaUpdate(null)}
       />
     </div>
   )
@@ -277,16 +408,6 @@ const styles = {
     fontWeight: 'bold',
     marginLeft: 'auto'
   },
-  incidentBtn: {
-    margin: 'var(--spacing-md)',
-    padding: 'var(--spacing-sm)',
-    background: 'var(--red)',
-    color: 'white',
-    border: 'none',
-    borderRadius: 'var(--radius-md)',
-    cursor: 'pointer',
-    fontWeight: 'bold',
-  }
 }
 
 export default App

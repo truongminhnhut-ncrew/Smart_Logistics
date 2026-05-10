@@ -7,8 +7,9 @@ import { incidentsAPI } from '../services/api'
 
 export const IncidentModal = ({ shippers = [], onClose }) => {
   const [shipperId, setShipperId] = useState(shippers[0]?.shipper_id || '')
-  const [type, setType] = useState('ACCIDENT')
+  const [type, setType] = useState('TRAFFIC_JAM')
   const [description, setDescription] = useState('')
+  const [rainLevel, setRainLevel] = useState('MEDIUM')
   const [loading, setLoading] = useState(false)
 
   const handleSubmit = async (e) => {
@@ -18,6 +19,7 @@ export const IncidentModal = ({ shippers = [], onClose }) => {
       await incidentsAPI.create({
         shipper_id: shipperId,
         incident_type: type,
+        rain_level: type === 'HEAVY_RAIN' ? rainLevel : undefined,
         description: description
       })
       onClose()
@@ -30,12 +32,11 @@ export const IncidentModal = ({ shippers = [], onClose }) => {
   }
 
   const incidentTypes = [
-    { value: 'ACCIDENT', label: 'Tai nạn (Accident)' },
-    { value: 'GPS_LOST', label: 'Mất tín hiệu GPS' },
-    { value: 'SHIPPER_LATE', label: 'Shipper đến trễ' },
-    { value: 'CUSTOMER_NOT_AVAILABLE', label: 'Khách không có mặt' },
-    { value: 'DELIVERY_REFUSED', label: 'Khách từ chối nhận' },
-    { value: 'CUSTOMER_REFUSED', label: 'Khách hủy đơn' },
+    { value: 'TRAFFIC_JAM', label: 'Kẹt xe (Traffic Jam)' },
+    { value: 'HEAVY_RAIN', label: 'Mưa lớn (Heavy Rain)' },
+    { value: 'CUSTOMER_ABSENT', label: 'Khách vắng mặt (Customer Absent)' },
+    { value: 'VEHICLE_BREAKDOWN', label: 'Hư xe (Vehicle Breakdown)' },
+    { value: 'LOST_CONNECTION', label: 'Mất kết nối GPS (Lost Connection)' },
   ]
 
   return (
@@ -70,6 +71,21 @@ export const IncidentModal = ({ shippers = [], onClose }) => {
               ))}
             </select>
           </div>
+
+          {type === 'HEAVY_RAIN' && (
+            <div style={styles.field}>
+              <label style={styles.label}>Mức độ mưa</label>
+              <select
+                value={rainLevel}
+                onChange={(e) => setRainLevel(e.target.value)}
+                style={styles.input}
+              >
+                <option value="LIGHT">LIGHT</option>
+                <option value="MEDIUM">MEDIUM</option>
+                <option value="HEAVY">HEAVY</option>
+              </select>
+            </div>
+          )}
 
           <div style={styles.field}>
             <label style={styles.label}>Mô tả chi tiết</label>

@@ -203,48 +203,23 @@ async def reset_simulation():
     return {"status": "reset", "shipper_count": len(simulation_engine.shippers)}
 
 
-@router.post("/incident/apply")
-async def apply_incident(req: IncidentRequest):
-    """Apply incident to a shipper."""
-    if req.shipper_id not in simulation_engine.shippers:
-        raise HTTPException(404, f"Shipper {req.shipper_id} not found")
-
-    result = simulation_engine.apply_incident(
-        req.shipper_id,
-        req.incident_type,
-        rain_level=req.rain_level
-    )
-
-    await ws_manager.broadcast_clients({
-        "type": "incident_created",
-        "shipper_id": req.shipper_id,
-        "incident_type": req.incident_type,
-        "result": result,
-    })
-
-    return result
-
-
-@router.post("/incident/resolve/{shipper_id}")
-async def resolve_incident(shipper_id: str):
-    """Resolve incident for a shipper."""
-    if shipper_id not in simulation_engine.shippers:
-        raise HTTPException(404, f"Shipper {shipper_id} not found")
-
-    result = simulation_engine.resolve_incident(shipper_id)
-
-    await ws_manager.broadcast_clients({
-        "type": "incident_resolved",
-        "shipper_id": shipper_id,
-        "result": result,
-    })
-
-    return result
-
 @router.get("/stats/fleet")
 async def get_fleet_stats():
     """GET /simulation/stats/fleet — Fleet statistics theo TONGQUAN.md."""
     return simulation_engine.get_fleet_stats()
+
+
+@router.get("/orders")
+async def get_simulation_orders():
+    """
+    Snapshot orders in-memory của simulation_engine (phục vụ demo UI hiển thị đơn 1–3 tại kho).
+    """
+    return {
+        "orders": simulation_engine._orders,
+        "delivery_targets": simulation_engine._delivery_targets,
+        "phase": simulation_engine.phase,
+        "tick": simulation_engine._tick,
+    }
 
 
 class IncidentApplyRequest(BaseModel):

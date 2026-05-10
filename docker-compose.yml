@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ── KAFKA INFRASTRUCTURE ────────────────────────────────
   zookeeper:
@@ -97,6 +95,8 @@ services:
     depends_on:
       - backend
     command: python data_generator/simulate.py
+    healthcheck:
+      disable: true
     profiles: ["simulator"]   # chạy với: docker compose --profile simulator up
 
   # ── FRONTEND ─────────────────────────────────────────────

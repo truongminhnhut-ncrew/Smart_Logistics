@@ -39,6 +39,7 @@ class ShipperRepository(BaseRepository):
             "total_distance_km": shipper.get("total_distance_km", 0.0),
             "last_ping_at": shipper.get("last_ping_at"),
             "order_id": shipper.get("active_order_id"),
+            "route_polyline": shipper.get("route_polyline"),
             "updated_at": shipper.get("updated_at"),
         }
 
@@ -148,6 +149,7 @@ class ShipperRepository(BaseRepository):
                 "current_status": shipper.get("status", "IDLE"),
                 "signal_status": shipper.get("signal_status", "ONLINE"),
                 "active_order_id": shipper.get("order_id"),
+                "route_polyline": shipper.get("route_polyline"),
                 "last_ping_at": timestamp,
                 "updated_at": datetime.utcnow(),
             },

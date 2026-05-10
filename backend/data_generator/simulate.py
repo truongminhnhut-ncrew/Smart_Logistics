@@ -10,9 +10,12 @@ import math
 import random
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Optional
 
+import aiohttp
 import websockets
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,6 +48,10 @@ class VirtualShipper:
     online: bool = True
     target_lat: Optional[float] = None
     target_lon: Optional[float] = None
+    # Fields to support snapping to nearest road
+    last_snapped_lat: Optional[float] = None
+    last_snapped_lon: Optional[float] = None
+    last_snap_time: float = 0.0
 
     def move(self, dt_seconds: float = 1.0):
         """Di chuyển shipper theo hướng + tốc độ hiện tại."""
@@ -95,6 +102,38 @@ class VirtualShipper:
         }
 
 
+async def maybe_snap_shipper(shipper: VirtualShipper, session: aiohttp.ClientSession):
+    """Snap a shipper's current location to the nearest road using OSRM nearest API.
+    To reduce API usage we only call OSRM when the shipper has moved sufficiently
+    from the last snapped point or after a time interval.
+    """
+    SNAP_DISTANCE_DEG = 0.00018  # ~20 meters
+    SNAP_INTERVAL_S = 10         # force a resnap at least every 10s
+    now = time.time()
+
+    if shipper.last_snapped_lat is not None and shipper.last_snapped_lon is not None:
+        dist = math.hypot(shipper.lat - shipper.last_snapped_lat, shipper.lon - shipper.last_snapped_lon)
+        if dist < SNAP_DISTANCE_DEG and (now - shipper.last_snap_time) < SNAP_INTERVAL_S:
+            return  # no need to resnap
+
+    url = f"https://router.project-osrm.org/nearest/v1/driving/{shipper.lon},{shipper.lat}?number=1"
+    try:
+        async with session.get(url, timeout=5) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                waypoints = data.get("waypoints") or []
+                if waypoints:
+                    lon, lat = waypoints[0].get("location", [shipper.lon, shipper.lat])
+                    shipper.last_snapped_lat = lat
+                    shipper.last_snapped_lon = lon
+                    shipper.last_snap_time = now
+                    # Apply snapped coordinate
+                    shipper.lat = lat
+                    shipper.lon = lon
+    except Exception as e:
+        # Ignore OSRM failures (network/rate limit) and keep original coordinates
+        logger.debug(f"[Simulator] OSRM snap failed for {shipper.shipper_id}: {e}")
+
 def init_shippers(count: int) -> list[VirtualShipper]:
     """Khởi tạo N shipper với vị trí ngẫu nhiên quanh TP.HCM."""
     shippers = []
@@ -114,37 +153,42 @@ async def run_simulation():
     shippers = init_shippers(SHIPPER_COUNT)
     logger.info(f"🛵 Initialized {SHIPPER_COUNT} virtual shippers")
 
-    while True:
-        try:
-            async with websockets.connect(BACKEND_WS_URL) as ws:
-                logger.info(f"✅ Connected to {BACKEND_WS_URL}")
-                tick = 0
+    async with aiohttp.ClientSession() as http_session:
+        while True:
+            try:
+                async with websockets.connect(BACKEND_WS_URL) as ws:
+                    logger.info(f"✅ Connected to {BACKEND_WS_URL}")
+                    tick = 0
 
-                while True:
-                    tick += 1
-                    payloads = []
+                    while True:
+                        tick += 1
+                        payloads = []
 
-                    for shipper in shippers:
-                        # Simulate GPS dropout
-                        shipper.online = random.random() > DROPOUT_PROB
+                        for shipper in shippers:
+                            # Simulate GPS dropout
+                            shipper.online = random.random() > DROPOUT_PROB
 
-                        if shipper.online:
-                            shipper.move(GPS_INTERVAL)
-                            payloads.append(shipper.to_gps_payload())
+                            if shipper.online:
+                                shipper.move(GPS_INTERVAL)
+                                try:
+                                    await maybe_snap_shipper(shipper, http_session)
+                                except Exception as e:
+                                    logger.debug(f"[Simulator] Snap error for {shipper.shipper_id}: {e}")
+                                payloads.append(shipper.to_gps_payload())
 
-                    # Gửi tất cả trong 1 batch (newline-delimited JSON)
-                    for p in payloads:
-                        await ws.send(json.dumps(p))
+                        # Gửi tất cả trong 1 batch (newline-delimited JSON)
+                        for p in payloads:
+                            await ws.send(json.dumps(p))
 
-                    if tick % 10 == 0:
-                        online = sum(1 for s in shippers if s.online)
-                        logger.info(f"[tick={tick}] Sent {len(payloads)} GPS | online={online}/{SHIPPER_COUNT}")
+                        if tick % 10 == 0:
+                            online = sum(1 for s in shippers if s.online)
+                            logger.info(f"[tick={tick}] Sent {len(payloads)} GPS | online={online}/{SHIPPER_COUNT}")
 
-                    await asyncio.sleep(GPS_INTERVAL)
+                        await asyncio.sleep(GPS_INTERVAL)
 
-        except Exception as e:
-            logger.warning(f"[Simulator] Connection error: {e}. Retrying in 3s...")
-            await asyncio.sleep(3)
+            except Exception as e:
+                logger.warning(f"[Simulator] Connection error: {e}. Retrying in 3s...")
+                await asyncio.sleep(3)
 
 
 if __name__ == "__main__":

@@ -100,29 +100,28 @@ def run_playwright_tests():
         else:
             print("  ⚠️  Nút 'Bắt đầu giao hàng' không thấy (có thể đang ở phase khác)")
 
-        # ── TEST 3: Tìm 3 shipper gần nhất ──────────────────────────────
-        print("\n[TEST 3] Tìm 3 shipper gần kho nhất")
-        btn_nearest = page.locator("button").filter(has_text="Tìm 3 shipper")
+        # ── TEST 3: AutoDemoPanel đang tự chạy (không phụ thuộc nút UI) ────
+        print("\n[TEST 3] AutoDemoPanel: xác nhận demo đang chạy và có giải thích trên UI")
         try:
-            btn_nearest.first.wait_for(state="visible", timeout=5000)
-            btn_nearest.first.click()
-            time.sleep(3)
-            snap("03_nearest")
-            print("  ✅ Đã tìm shipper gần nhất")
+            page.locator("text=Auto Demo").first.wait_for(state="visible", timeout=15000)
+            # Banner message (đang chạy bước nào)
+            page.locator("text=Đang").first.wait_for(state="visible", timeout=15000)
+            time.sleep(2)
+            snap("03_autodemo_running")
+            print("  ✅ AutoDemoPanel hiển thị, demo đang tự chạy + có message giải thích")
         except Exception:
-            print("  ⚠️  Nút tìm shipper chưa hiển thị")
+            print("  ⚠️  Không thấy AutoDemoPanel/banner giải thích (có thể UI đổi layout)")
 
-        # ── TEST 4: Dispatch to Warehouse ────────────────────────────────
-        print("\n[TEST 4] Dispatch shippers")
-        btn_dispatch = page.locator("button").filter(has_text="Dispatch")
+        # ── TEST 4: Theo dõi bước dispatch/warehouse từ AutoDemo (không click nút) ──
+        print("\n[TEST 4] AutoDemoPanel: chờ đến phase dispatch/warehouse")
         try:
-            btn_dispatch.first.wait_for(state="visible", timeout=5000)
-            btn_dispatch.first.click()
-            time.sleep(3)
-            snap("04_dispatching")
-            print("  ✅ Đã dispatch")
+            # Khi dispatch chạy, trong panel sẽ xuất hiện note có chữ 'dispatch' hoặc bước đang running có icon ⏳
+            page.locator("text=Dispatch shipper về kho").first.wait_for(state="visible", timeout=60000)
+            time.sleep(2)
+            snap("04_autodemo_dispatch")
+            print("  ✅ Đã tới bước dispatch (theo AutoDemoPanel)")
         except Exception:
-            print("  ⚠️  Nút Dispatch chưa hiển thị")
+            print("  ⚠️  Chưa tới bước dispatch trong thời gian chờ")
 
         # ── TEST 5: Chọn shipper đầu tiên ────────────────────────────────
         print("\n[TEST 5] Chọn shipper đầu tiên")
@@ -160,14 +159,23 @@ def run_playwright_tests():
             print(f"  {status} Nút sự cố '{inc}'")
         snap("07_incident_panel")
 
-        # ── TEST 8: Chờ delivery modal ───────────────────────────────────
-        print("\n[TEST 8] Chờ shippers về Warehouse (tối đa 30s)")
+        # ── TEST 8: Chờ DeliveryModal (form nhập thông tin giao hàng) ─────
+        print("\n[TEST 8] Chờ DeliveryModal '📦 Giao lệnh vận chuyển' (tối đa 120s)")
         try:
-            page.locator("text=All shippers arrived").wait_for(state="visible", timeout=30000)
+            # Modal title trong DeliveryModal.jsx
+            page.locator("text=📦 Giao lệnh vận chuyển").wait_for(state="visible", timeout=120000)
+            time.sleep(2)
             snap("08_delivery_modal")
-            print("  ✅ DeliveryModal xuất hiện!")
+            print("  ✅ DeliveryModal xuất hiện (có form nhập thông tin giao hàng)!")
+            
+            # Điền form và submit
+            page.fill("input[type='text']", "Auto Test Address")
+            page.fill("input[type='number']", "5") # items
+            page.locator("button").filter(has_text="Xác nhận giao hàng").click()
+            print("  ✅ Đã điền form và submit assign delivery")
+            time.sleep(2)
         except Exception:
-            print("  ⚠️  DeliveryModal chưa xuất hiện (bình thường nếu chưa dispatch)")
+            print("  ⚠️  DeliveryModal chưa xuất hiện trong 120s (cần kiểm tra backend events/dispatch/phase)")
 
         # ── TEST 9: Reset ────────────────────────────────────────────────
         print("\n[TEST 9] Reset Simulation")

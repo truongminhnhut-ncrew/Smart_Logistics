@@ -10,6 +10,7 @@ export const useShippers = () => {
   const [simulationPhase, setSimulationPhase] = useState('IDLE')
   const [dispatchedIds, setDispatchedIds] = useState([])
   const [arrivedAtWarehouse, setArrivedAtWarehouse] = useState([])
+  const deliveryHistoryRef = useRef(new Map()) // shipper_id -> completed_count
 
   // Handle bulk GPS update (all shippers at once)
   const handleBulkUpdate = useCallback((data) => {
@@ -18,7 +19,8 @@ export const useShippers = () => {
       const updated = new Map(prev)
       data.shippers.forEach(s => {
         const existing = updated.get(s.shipper_id) || {}
-        updated.set(s.shipper_id, { ...existing, ...s })
+        const completedCount = deliveryHistoryRef.current.get(s.shipper_id) || existing.completed_orders_count || 0
+        updated.set(s.shipper_id, { ...existing, ...s, completed_orders_count: completedCount })
       })
       return updated
     })
@@ -40,7 +42,10 @@ export const useShippers = () => {
   const handleInitialState = useCallback((data) => {
     if (!data.shippers) return
     const map = new Map()
-    data.shippers.forEach(s => map.set(s.shipper_id, s))
+    data.shippers.forEach(s => {
+      const completedCount = deliveryHistoryRef.current.get(s.shipper_id) || s.completed_orders_count || 0
+      map.set(s.shipper_id, { ...s, completed_orders_count: completedCount })
+    })
     setShippers(map)
     if (data.phase) setSimulationPhase(data.phase)
   }, [])
@@ -71,7 +76,16 @@ export const useShippers = () => {
     setShippers(prev => {
       const updated = new Map(prev)
       const s = updated.get(data.shipper_id)
-      if (s) updated.set(data.shipper_id, { ...s, status: 'DELIVERING', order_id: data.order_id })
+      if (s) {
+        updated.set(data.shipper_id, {
+          ...s,
+          status: 'DELIVERING',
+          order_id: data.order_id,
+          current_order_dest_lat: data.dest_lat ?? s.current_order_dest_lat ?? null,
+          current_order_dest_lon: data.dest_lon ?? s.current_order_dest_lon ?? null,
+          current_order_destination_text: data.destination_text ?? s.current_order_destination_text ?? null,
+        })
+      }
       return updated
     })
   }, [])
@@ -80,7 +94,19 @@ export const useShippers = () => {
     setShippers(prev => {
       const updated = new Map(prev)
       const s = updated.get(data.shipper_id)
-      if (s) updated.set(data.shipper_id, { ...s, status: 'DELIVERED', order_id: null })
+      if (s) {
+        const oldCount = deliveryHistoryRef.current.get(data.shipper_id) || s.completed_orders_count || 0
+        const newCount = oldCount + 1
+        deliveryHistoryRef.current.set(data.shipper_id, newCount)
+
+        updated.set(data.shipper_id, {
+          ...s,
+          status: 'DELIVERED',
+          order_id: null,
+          completed_orders_count: newCount,
+          last_completed_order_id: data.order_id || s.order_id || null,
+        })
+      }
       return updated
     })
   }, [])
@@ -93,6 +119,7 @@ export const useShippers = () => {
     setSimulationPhase('IDLE')
     setDispatchedIds([])
     setArrivedAtWarehouse([])
+    deliveryHistoryRef.current = new Map()
   }, [])
 
   const selectedShipper = selectedShipperId ? shippers.get(selectedShipperId) : null
